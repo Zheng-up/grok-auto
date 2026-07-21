@@ -1,0 +1,1 @@
+"""Compatibility namespace for retained mail/proxy adapters."""

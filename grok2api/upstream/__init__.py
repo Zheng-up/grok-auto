@@ -1,0 +1,1 @@
+"""Retained registration upstream adapters."""
