@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Eye, EyeOff, Loader2, Mail, Save, Shield, ShieldCheck, SlidersHorizontal } from 'lucide-react'
+import { Eye, EyeOff, Loader2, Mail, RefreshCw, Save, Shield, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
 import { useState } from 'react'
 import { Button, Card, Field, Input, PageHeader, Select, Textarea, Toggle } from '../components/ui'
@@ -34,20 +34,90 @@ export function SettingsPage() {
   return <SettingsForm initial={query.data} client={client} />
 }
 
+type RemoteSession = {
+  configured: boolean
+  state: string
+  ok: boolean
+  origin?: string
+  username?: string
+  has_access_token?: boolean
+  access_expires_at?: string
+  access_expires_in?: number
+  refresh_expires_at?: string
+  last_login_at?: string
+  last_refresh_at?: string
+  error?: string
+}
+
+function formatDuration(seconds?: number) {
+  const value = Math.max(0, Number(seconds || 0))
+  if (!value) return '已过期'
+  const hours = Math.floor(value / 3600)
+  const minutes = Math.floor((value % 3600) / 60)
+  const secs = value % 60
+  if (hours > 0) return `${hours}小时${minutes}分`
+  if (minutes > 0) return `${minutes}分${secs}秒`
+  return `${secs}秒`
+}
+
+function formatWallTime(value?: string) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
 function SettingsForm({ initial, client }: { initial: Settings; client: ReturnType<typeof useQueryClient> }) {
   const [form, setForm] = useState<Settings>(initial)
   const set = (key: string, value: string | number | boolean) => setForm((current) => ({ ...current, [key]: value }))
   const configured = (key: string) => Boolean(form[key]) || Boolean(form[`${key}_configured`])
+  const sessionQuery = useQuery({
+    queryKey: ['remote-session'],
+    queryFn: () => api<RemoteSession>('/api/settings/remote-session?ensure=true'),
+    refetchInterval: 15000,
+  })
   const save = useMutation({
     mutationFn: () => api<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify({ values: form }) }),
-    onSuccess: (data) => { client.setQueryData(['settings'], data); setForm(data); toast.success('设置已保存') },
+    onSuccess: async (data) => {
+      client.setQueryData(['settings'], data)
+      setForm(data)
+      await client.invalidateQueries({ queryKey: ['remote-session'] })
+      toast.success('设置已保存')
+    },
     onError: (error) => toast.error(error instanceof Error ? error.message : '设置保存失败'),
   })
   const test = useMutation({
-    mutationFn: () => api<{ ok: boolean; mode?: string }>('/api/settings/test-remote', { method: 'POST', body: '{}' }),
-    onSuccess: (data) => data.ok ? toast.success('远端管理接口连接正常') : toast.error('远端连接失败'),
+    mutationFn: () => api<{ ok: boolean; mode?: string; error?: string; session?: RemoteSession }>('/api/settings/test-remote', { method: 'POST', body: '{}' }),
+    onSuccess: async (data) => {
+      if (data.session) client.setQueryData(['remote-session'], data.session)
+      else await client.invalidateQueries({ queryKey: ['remote-session'] })
+      if (data.ok) toast.success('远端管理接口连接正常，系统登录态已刷新')
+      else toast.error(data.error || '远端连接失败')
+    },
     onError: (error) => toast.error(error instanceof Error ? error.message : '远端连接失败'),
   })
+  const refreshSession = useMutation({
+    mutationFn: () => api<RemoteSession>('/api/settings/remote-session/refresh', { method: 'POST', body: '{}' }),
+    onSuccess: (data) => {
+      client.setQueryData(['remote-session'], data)
+      if (data.ok) toast.success('远端登录态已刷新')
+      else toast.error(data.error || '刷新登录态失败')
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : '刷新登录态失败'),
+  })
+  const session = sessionQuery.data
+  const sessionTone = session?.ok
+    ? 'text-emerald-600 dark:text-emerald-400'
+    : session?.state === 'error'
+      ? 'text-red-600 dark:text-red-400'
+      : 'text-amber-600 dark:text-amber-400'
+  const sessionLabel = !session?.configured
+    ? '未配置'
+    : session.ok
+      ? '已登录'
+      : session.state === 'error'
+        ? '登录异常'
+        : '未登录'
 
   return <>
     <PageHeader title="系统设置" actions={<Button onClick={() => save.mutate()} disabled={save.isPending}><Save size={16} />{save.isPending ? '保存中' : '保存设置'}</Button>} />
@@ -94,12 +164,19 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
       </Card></div>
 
       <div id="remote-settings" className="scroll-mt-6"><Card className="border-l-4 border-l-emerald-500 p-5 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="flex size-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-950 dark:text-emerald-400"><ShieldCheck size={17} /></span><div><h2 className="font-medium">Grok2API 远端池</h2><p className="muted mt-0.5 text-xs">SSO、Build 和 Console 共用管理员登录配置</p></div></div><Button variant="secondary" onClick={() => test.mutate()} disabled={test.isPending}>{test.isPending && <Loader2 className="animate-spin" size={15} />}测试连接</Button></div>
+        <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="flex size-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-950 dark:text-emerald-400"><ShieldCheck size={17} /></span><div><h2 className="font-medium">Grok2API 远端池</h2><p className="muted mt-0.5 text-xs">系统级管理员登录态；SSO / Build / Console 推送共用此 Token</p></div></div><div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => refreshSession.mutate()} disabled={refreshSession.isPending}>{refreshSession.isPending ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}刷新登录态</Button><Button variant="secondary" onClick={() => test.mutate()} disabled={test.isPending}>{test.isPending && <Loader2 className="animate-spin" size={15} />}测试连接</Button></div></div>
+        <div className="mt-4 grid gap-3 rounded-xl border bg-[var(--soft)]/60 p-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div><div className="muted text-xs">登录状态</div><div className={`mt-1 text-sm font-medium ${sessionTone}`}>{sessionLabel}</div></div>
+          <div><div className="muted text-xs">Access 有效期</div><div className="mt-1 text-sm font-medium">{session?.ok ? formatDuration(session.access_expires_in) : '—'}</div><div className="muted mt-0.5 text-[11px]">{session?.access_expires_at ? formatWallTime(session.access_expires_at) : ''}</div></div>
+          <div><div className="muted text-xs">最近刷新</div><div className="mt-1 text-sm font-medium">{formatWallTime(session?.last_refresh_at || session?.last_login_at)}</div></div>
+          <div><div className="muted text-xs">远端站点</div><div className="mt-1 truncate text-sm font-medium" title={session?.origin || ''}>{session?.origin || '—'}</div></div>
+          {session?.error ? <div className="sm:col-span-2 xl:col-span-4 text-xs text-red-600 dark:text-red-400">{session.error}</div> : null}
+        </div>
         <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-[minmax(240px,2fr)_minmax(180px,1fr)_minmax(220px,1.3fr)_minmax(180px,0.8fr)]">
           <Field label="Base URL"><Input value={String(form.remote_base_url ?? '')} onChange={(event) => set('remote_base_url', event.target.value)} placeholder="https://grok2api.example.com" /></Field>
           <Field label="管理员用户名"><Input value={String(form.remote_username ?? '')} onChange={(event) => set('remote_username', event.target.value)} /></Field>
           <Field label="密码 / App Key" hint={configured('remote_secret') ? '已配置，点击眼睛查看' : '尚未配置'}><SecretControl value={String(form.remote_secret ?? '')} onChange={(value) => set('remote_secret', value)} /></Field>
-          <Field label="远端操作并发数" hint="默认 4，最多 50；仅限制远端入池"><NumberInput value={form.remote_operation_concurrency} min={1} max={50} onChange={(value) => set('remote_operation_concurrency', value)} /></Field>
+          <Field label="远端操作并发数" hint="默认 4，最多 50；仅限制远端入池任务"><NumberInput value={form.remote_operation_concurrency} min={1} max={50} onChange={(value) => set('remote_operation_concurrency', value)} /></Field>
         </div>
       </Card></div>
     </div>

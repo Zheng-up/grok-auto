@@ -95,7 +95,30 @@ export function GlobalTaskStatus() {
           failed += waitingCount
         }
       }
-      for (const task of retryable) {
+      const failedOperations = retryable.filter((task) => task.kind === 'operation')
+      const failedBatches = retryable.filter((task) => task.kind === 'batch')
+      if (failedOperations.length) {
+        try {
+          const result = await api<{ total: number; started: number; marked: number; failed: number }>(
+            '/api/operations/retry-failed',
+            { method: 'POST' },
+          )
+          // All failed operation cards should leave the workspace (status -> retried).
+          succeeded += Math.max(result.marked || failedOperations.length, 0)
+          failed += Math.max(result.failed || 0, 0)
+        } catch {
+          // Fallback: still try one by one so partial progress is possible.
+          for (const task of failedOperations) {
+            try {
+              await createRetry(task)
+              succeeded += 1
+            } catch {
+              failed += 1
+            }
+          }
+        }
+      }
+      for (const task of failedBatches) {
         try {
           await createRetry(task)
           succeeded += 1
@@ -107,8 +130,8 @@ export function GlobalTaskStatus() {
     } finally {
       setRetrying(undefined)
     }
-    if (failed) toast.warning(`批量重试完成：成功 ${succeeded}，失败 ${failed}`)
-    else toast.success(`已依次重试 ${succeeded} 个任务`)
+    if (failed) toast.warning(`批量重试完成：状态已更新 ${succeeded}，仍有 ${failed} 个未成功重排队`)
+    else toast.success(`已重试并更新 ${succeeded} 个失败任务状态`)
   }
 
   const controlTask = async (task: TaskSpaceTask, action: 'pause' | 'resume') => {

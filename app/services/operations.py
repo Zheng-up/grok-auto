@@ -37,6 +37,16 @@ class OperationManager:
         if before:
             self._before_handlers[kind] = before
 
+    def _is_remote_kind(self, kind: str) -> bool:
+        return kind in self._before_handlers or kind.startswith("remote_")
+
+    def _concurrency_for(self, kind: str, total: int) -> int:
+        if self._is_remote_kind(kind):
+            raw = int(self.settings.get("remote_operation_concurrency", 4) or 4)
+        else:
+            raw = int(self.settings.get("registration_concurrency", 2) or 2)
+        return max(1, min(raw, 50, max(1, total)))
+
     def start(self, kind: str, account_ids: list[str]) -> dict[str, Any]:
         if kind not in self._handlers:
             raise ValueError(f"unsupported operation: {kind}")
@@ -44,7 +54,7 @@ class OperationManager:
         if not unique_ids:
             raise ValueError("select at least one account")
         operation_id = f"op_{uuid.uuid4().hex[:16]}"
-        concurrency = max(1, min(int(self.settings.get("registration_concurrency", 2) or 2), 50, len(unique_ids)))
+        concurrency = self._concurrency_for(kind, len(unique_ids))
         retry_limit = max(0, min(int(self.settings.get("registration_retry_limit", 1) or 0), 5))
         with self._lock, self.db.transaction() as conn:
             placeholders = ",".join("?" for _ in unique_ids)
@@ -181,7 +191,7 @@ class OperationManager:
         account_ids = [str(row["account_id"]) for row in rows]
         if not account_ids:
             return False
-        concurrency = max(1, min(int(self.settings.get("registration_concurrency", 2) or 2), 50, len(account_ids)))
+        concurrency = self._concurrency_for(str(operation["kind"]), len(account_ids))
         retry_limit = max(0, min(int(self.settings.get("registration_retry_limit", 1) or 0), 5))
         with self._lock:
             cancel = self._cancel.setdefault(operation_id, threading.Event())
@@ -514,13 +524,54 @@ class OperationManager:
             if item["status"] in {"failed", "interrupted"}
         ]
         if not retryable_ids:
+            # Still clear the terminal failed card from task space.
+            self.db.execute(
+                "UPDATE operation_jobs SET status='retried',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (operation_id,),
+            )
             raise ValueError("operation has no retryable items")
-        retried = self.start(str(operation["kind"]), retryable_ids)
+        # Flip status first so task-space UI leaves the failed state immediately.
         self.db.execute(
             "UPDATE operation_jobs SET status='retried',updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (operation_id,),
         )
+        self.events.publish(operation_id, "[*] 失败任务已转入重试", "warning")
+        retried = self.start(str(operation["kind"]), retryable_ids)
         return retried
+
+    def retry_failed(self) -> dict[str, Any]:
+        """Retry every failed/partial/interrupted operation and mark them retried."""
+        rows = self.db.fetch_all(
+            """
+            SELECT id, kind, status FROM operation_jobs
+            WHERE status IN ('failed', 'partial', 'interrupted')
+            ORDER BY created_at ASC
+            """
+        )
+        started: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        marked = 0
+        for row in rows:
+            operation_id = str(row["id"])
+            try:
+                started.append(self.retry(operation_id))
+                marked += 1
+            except Exception as exc:
+                # Ensure failed cards still leave the workspace even if requeue fails.
+                self.db.execute(
+                    "UPDATE operation_jobs SET status='retried',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('failed','partial','interrupted')",
+                    (operation_id,),
+                )
+                marked += 1
+                errors.append({"id": operation_id, "error": str(exc)[:300]})
+        return {
+            "total": len(rows),
+            "marked": marked,
+            "started": len(started),
+            "failed": len(errors),
+            "operations": started,
+            "errors": errors,
+        }
 
     def close(self) -> None:
         with self._lock:

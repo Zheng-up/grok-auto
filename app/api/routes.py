@@ -133,15 +133,39 @@ def update_settings(
 ) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return services.settings.set_many(body.values)
+        saved = services.settings.set_many(body.values)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Keep process-level Grok2API session aligned with saved credentials.
+    remote_keys = {"remote_base_url", "remote_username", "remote_secret"}
+    if remote_keys.intersection(body.values or {}):
+        try:
+            services.remote.session_status(ensure=True, force_refresh=True)
+        except Exception:
+            pass
+    return saved
 
 
 @router.post("/settings/test-remote")
 def test_remote(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
     try:
         return services.remote.test_connection()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/settings/remote-session")
+def remote_session_status(
+    ensure: bool = Query(default=True),
+    _: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    return services.remote.session_status(ensure=ensure)
+
+
+@router.post("/settings/remote-session/refresh")
+def refresh_remote_session(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        return services.remote.session_status(ensure=True, force_refresh=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -347,6 +371,11 @@ def retry_operation(
     except ValueError as exc:
         status_code = 404 if str(exc) == "operation not found" else 409
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.post("/operations/retry-failed", status_code=202)
+def retry_failed_operations(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    return services.operations.retry_failed()
 
 
 @router.get("/operations/{operation_id}")
