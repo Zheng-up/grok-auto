@@ -190,8 +190,8 @@ export function GlobalTaskStatus() {
   return <section
     ref={rootRef}
     className={`fixed bottom-3 right-3 z-40 origin-bottom-right border shadow-2xl will-change-[width,height,border-radius] transition-[width,height,border-radius,background-color,border-color] sm:bottom-6 sm:right-4 ${open
-      ? 'left-3 h-[calc(100dvh-1.5rem)] w-auto overflow-hidden rounded-xl border-[var(--border)] bg-[var(--panel)] duration-[450ms] ease-[cubic-bezier(0.16,1,0.3,1)] sm:left-auto sm:h-[min(540px,calc(100vh-7rem))] sm:w-[min(560px,calc(100vw-2rem))]'
-      : 'left-auto h-12 w-12 overflow-visible rounded-[24px] border-transparent bg-neutral-900 duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] dark:bg-white'
+      ? 'h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] overflow-hidden rounded-xl border-[var(--border)] bg-[var(--panel)] duration-[450ms] ease-[cubic-bezier(0.16,1,0.3,1)] sm:h-[min(540px,calc(100vh-7rem))] sm:w-[min(560px,calc(100vw-2rem))]'
+      : 'h-12 w-12 overflow-visible rounded-[24px] border-transparent bg-neutral-900 duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] dark:bg-white'
     }`}
     aria-label="全局任务状态"
   >

@@ -112,7 +112,7 @@ function AccountFilterPanel({
     return 'text-sky-600 dark:text-sky-400'
   }
 
-  return <div className="surface absolute left-0 top-12 z-30 w-52 overflow-visible p-1 shadow-xl" onMouseLeave={() => setActiveKey(null)}>
+  return <div className={`surface absolute right-0 top-12 z-30 grid w-[min(calc(100vw-2.5rem),24rem)] ${activeField ? 'grid-cols-2' : 'grid-cols-1'} overflow-hidden p-1 shadow-xl sm:left-0 sm:right-auto sm:block sm:w-52 sm:overflow-visible`} onMouseLeave={() => setActiveKey(null)}>
     <div className="py-1">
       {FILTER_FIELDS.map((field) => {
         const selected = selectedOption(field)
@@ -122,11 +122,12 @@ function AccountFilterPanel({
           className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm transition ${activeKey === field.key ? 'bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300' : 'hover:bg-[var(--soft)]'}`}
           onMouseEnter={() => setActiveKey(field.key)}
           onFocus={() => setActiveKey(field.key)}
+          onClick={() => setActiveKey(field.key)}
         ><span>{field.label}</span><span className="flex items-center gap-1">{selected && <span className={`max-w-16 truncate text-xs ${optionTone(selected.value)}`}>{selected.label}</span>}<ChevronRight size={14} className="muted" /></span></button>
       })}
       <div className="mt-1 border-t px-2 pt-2"><button type="button" className="muted w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-[var(--soft)] hover:text-[var(--strong)]" onClick={onClear}>清除全部筛选</button></div>
     </div>
-    {activeField && <div className="surface absolute left-[calc(100%-1px)] top-0 w-48 p-1 shadow-xl">
+    {activeField && <div className="surface min-w-0 border-l p-1 shadow-xl sm:absolute sm:left-[calc(100%-1px)] sm:top-0 sm:w-48 sm:border-l-0">
       {[{ value: '', label: '全部' }, ...activeField.values].map((option) => <button
         type="button"
         key={option.value || 'all'}

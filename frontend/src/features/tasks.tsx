@@ -63,23 +63,23 @@ export function TasksPage() {
 
   return <>
     <PageHeader title="任务日志" />
-    <Card className="grid h-[calc(100vh-160px)] min-h-[580px] overflow-hidden xl:grid-cols-[minmax(580px,1.15fr)_minmax(380px,0.85fr)]">
+    <Card className="grid min-h-0 overflow-hidden xl:h-[calc(100vh-160px)] xl:min-h-[580px] xl:grid-cols-[minmax(580px,1.15fr)_minmax(380px,0.85fr)]">
       <section className="flex min-h-0 flex-col border-b xl:border-b-0 xl:border-r">
         <div className="flex shrink-0 items-center gap-1 border-b p-3">
           <button type="button" className={`rounded-lg px-4 py-2 text-sm ${kind === 'batches' ? 'bg-neutral-900 text-white dark:bg-white dark:text-black' : 'muted hover:bg-[var(--soft)]'}`} onClick={() => switchKind('batches')}>注册批次</button>
           <button type="button" className={`rounded-lg px-4 py-2 text-sm ${kind === 'operations' ? 'bg-neutral-900 text-white dark:bg-white dark:text-black' : 'muted hover:bg-[var(--soft)]'}`} onClick={() => switchKind('operations')}>账号操作</button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto scrollbar">
+        <div className="scrollbar max-h-[min(420px,52vh)] min-h-0 flex-1 overflow-auto xl:max-h-none">
           {kind === 'batches' ? <BatchTable rows={batches.data ?? []} stream={selectedStream} onSelect={setStream} /> : <OperationTable rows={operations.data ?? []} stream={selectedStream} onSelect={setStream} />}
         </div>
         <div className="shrink-0"><PaginationBar total={total} page={page} pageSize={pageSize} pageSizes={PAGE_SIZES} onPageChange={(next) => { setPage(next); setStream(undefined) }} onPageSizeChange={(next) => { setPageSize(next); setPage(1); setStream(undefined) }} /></div>
       </section>
 
-      <section className="flex min-h-0 flex-col bg-neutral-950">
+      <section className="flex min-h-[320px] flex-col bg-neutral-950 xl:min-h-0">
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-neutral-800 px-4 py-3 text-white">
           <div className="min-w-0"><h2 className="truncate text-sm font-medium">{selectedStream ? `日志 · ${selectedStream}` : '任务日志'}</h2></div>
-          <Button variant="ghost" className="shrink-0 text-neutral-300 hover:bg-neutral-800" disabled={clearing} onClick={() => void clearAllLogs()}><Trash2 size={14} />{clearing ? '清空中' : '清空全部日志'}</Button>
+          <Button variant="ghost" className="shrink-0 px-2.5 text-xs text-neutral-300 hover:bg-neutral-800 sm:px-3.5 sm:text-sm" disabled={clearing} onClick={() => void clearAllLogs()}><Trash2 size={14} /><span className="sm:hidden">清空</span><span className="hidden sm:inline">{clearing ? '清空中' : '清空全部日志'}</span></Button>
         </div>
         <LogViewer rows={selectedStream ? logs : []} className="min-h-0 flex-1" emptyText={selectedStream ? '暂无日志或正在连接…' : '请选择一个任务'} />
       </section>
@@ -89,10 +89,37 @@ export function TasksPage() {
 
 function BatchTable({ rows, stream, onSelect }: { rows: Batch[]; stream?: string; onSelect: (id: string) => void }) {
   if (!rows.length) return <Empty />
-  return <table className="w-full min-w-[660px] text-left text-sm"><thead className="sticky top-0 z-10 bg-[var(--panel)] text-xs muted"><tr><th className="px-4 py-3 font-medium">批次</th><th className="px-3 py-3 font-medium">进度</th><th className="px-3 py-3 font-medium">结果</th><th className="px-3 py-3 font-medium">创建时间</th><th className="px-4 py-3 font-medium">状态</th></tr></thead><tbody className="divide-y">{rows.map((batch) => <tr key={batch.id} className={`cursor-pointer ${stream === batch.id ? 'bg-[var(--soft)]' : 'hover:bg-[var(--soft)]'}`} onClick={() => onSelect(batch.id)}><td className="px-4 py-3 font-mono text-xs">{batch.id}</td><td className="px-3 py-3">{batch.completed}/{batch.target_count}</td><td className="px-3 py-3 text-xs">成功 {batch.success} · 失败 {batch.failed}</td><td className="muted px-3 py-3 text-xs">{new Date(`${batch.created_at}Z`).toLocaleString()}</td><td className="px-4 py-3"><Badge value={batch.status} /></td></tr>)}</tbody></table>
+  return <>
+    <div className="divide-y sm:hidden">{rows.map((batch) => <button
+      key={batch.id}
+      type="button"
+      className={`block w-full px-4 py-3 text-left transition ${stream === batch.id ? 'bg-[var(--soft)]' : 'hover:bg-[var(--soft)]'}`}
+      onClick={() => onSelect(batch.id)}
+    >
+      <div className="flex min-w-0 items-center justify-between gap-3"><span className="min-w-0 truncate font-mono text-xs">{batch.id}</span><Badge value={batch.status} /></div>
+      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <div><span className="muted">进度</span><strong className="ml-2 font-medium">{batch.completed}/{batch.target_count}</strong></div>
+        <div className="text-right"><span className="muted">结果</span><strong className="ml-2 font-medium">{batch.success} 成功 · {batch.failed} 失败</strong></div>
+        <div className="muted col-span-2 truncate">{new Date(`${batch.created_at}Z`).toLocaleString()}</div>
+      </div>
+    </button>)}</div>
+    <table className="hidden w-full min-w-[660px] text-left text-sm sm:table"><thead className="sticky top-0 z-10 bg-[var(--panel)] text-xs muted"><tr><th className="px-4 py-3 font-medium">批次</th><th className="px-3 py-3 font-medium">进度</th><th className="px-3 py-3 font-medium">结果</th><th className="px-3 py-3 font-medium">创建时间</th><th className="px-4 py-3 font-medium">状态</th></tr></thead><tbody className="divide-y">{rows.map((batch) => <tr key={batch.id} className={`cursor-pointer ${stream === batch.id ? 'bg-[var(--soft)]' : 'hover:bg-[var(--soft)]'}`} onClick={() => onSelect(batch.id)}><td className="px-4 py-3 font-mono text-xs">{batch.id}</td><td className="px-3 py-3">{batch.completed}/{batch.target_count}</td><td className="px-3 py-3 text-xs">成功 {batch.success} · 失败 {batch.failed}</td><td className="muted px-3 py-3 text-xs">{new Date(`${batch.created_at}Z`).toLocaleString()}</td><td className="px-4 py-3"><Badge value={batch.status} /></td></tr>)}</tbody></table>
+  </>
 }
 
 function OperationTable({ rows, stream, onSelect }: { rows: Operation[]; stream?: string; onSelect: (id: string) => void }) {
   if (!rows.length) return <Empty />
-  return <table className="w-full min-w-[660px] text-left text-sm"><thead className="sticky top-0 z-10 bg-[var(--panel)] text-xs muted"><tr><th className="px-4 py-3 font-medium">操作类型</th><th className="px-3 py-3 font-medium">任务 ID</th><th className="px-3 py-3 font-medium">进度</th><th className="px-3 py-3 font-medium">创建时间</th><th className="px-4 py-3 font-medium">状态</th></tr></thead><tbody className="divide-y">{rows.map((operation) => <tr key={operation.id} className={`cursor-pointer ${stream === operation.id ? 'bg-[var(--soft)]' : 'hover:bg-[var(--soft)]'}`} onClick={() => onSelect(operation.id)}><td className="px-4 py-3 font-medium">{operationLabel(operation.kind)}</td><td className="px-3 py-3 font-mono text-xs">{operation.id}</td><td className="px-3 py-3">{operation.completed}/{operation.total}</td><td className="muted px-3 py-3 text-xs">{new Date(`${operation.created_at}Z`).toLocaleString()}</td><td className="px-4 py-3"><Badge value={operation.status} /></td></tr>)}</tbody></table>
+  return <>
+    <div className="divide-y sm:hidden">{rows.map((operation) => <button
+      key={operation.id}
+      type="button"
+      className={`block w-full px-4 py-3 text-left transition ${stream === operation.id ? 'bg-[var(--soft)]' : 'hover:bg-[var(--soft)]'}`}
+      onClick={() => onSelect(operation.id)}
+    >
+      <div className="flex items-center justify-between gap-3"><strong className="min-w-0 truncate text-sm font-medium">{operationLabel(operation.kind)}</strong><Badge value={operation.status} /></div>
+      <div className="mt-1.5 truncate font-mono text-[11px]">{operation.id}</div>
+      <div className="mt-2 flex items-center justify-between gap-4 text-xs"><span><span className="muted">进度</span><strong className="ml-2 font-medium">{operation.completed}/{operation.total}</strong></span><span className="muted truncate text-right">{new Date(`${operation.created_at}Z`).toLocaleString()}</span></div>
+    </button>)}</div>
+    <table className="hidden w-full min-w-[660px] text-left text-sm sm:table"><thead className="sticky top-0 z-10 bg-[var(--panel)] text-xs muted"><tr><th className="px-4 py-3 font-medium">操作类型</th><th className="px-3 py-3 font-medium">任务 ID</th><th className="px-3 py-3 font-medium">进度</th><th className="px-3 py-3 font-medium">创建时间</th><th className="px-4 py-3 font-medium">状态</th></tr></thead><tbody className="divide-y">{rows.map((operation) => <tr key={operation.id} className={`cursor-pointer ${stream === operation.id ? 'bg-[var(--soft)]' : 'hover:bg-[var(--soft)]'}`} onClick={() => onSelect(operation.id)}><td className="px-4 py-3 font-medium">{operationLabel(operation.kind)}</td><td className="px-3 py-3 font-mono text-xs">{operation.id}</td><td className="px-3 py-3">{operation.completed}/{operation.total}</td><td className="muted px-3 py-3 text-xs">{new Date(`${operation.created_at}Z`).toLocaleString()}</td><td className="px-4 py-3"><Badge value={operation.status} /></td></tr>)}</tbody></table>
+  </>
 }

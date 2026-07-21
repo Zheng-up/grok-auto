@@ -52,13 +52,13 @@ export function AppShell() {
       open ? 'translate-x-0' : '-translate-x-full',
       collapsed ? 'lg:w-20' : 'lg:w-64',
     )}>
-      <button
+      {open && <button
         type="button"
         className="absolute -right-5 top-3 z-10 flex size-10 items-center justify-center rounded-full border bg-[var(--panel)] text-[var(--strong)] shadow-md transition-colors hover:bg-[var(--soft)] lg:hidden"
         onClick={() => setOpen(false)}
         aria-label="收起导航"
         title="收起导航"
-      ><ChevronLeft size={20} strokeWidth={2.4} /></button>
+      ><ChevronLeft size={20} strokeWidth={2.4} /></button>}
       <button
         type="button"
         className="absolute -right-4 top-5 z-10 hidden size-8 items-center justify-center rounded-full border bg-[var(--panel)] text-[var(--strong)] shadow-md transition-colors hover:bg-[var(--soft)] lg:flex"
