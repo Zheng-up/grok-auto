@@ -211,16 +211,16 @@ class Database:
                     "ALTER TABLE operation_jobs ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
                 )
             conn.execute(
-                "UPDATE registration_batches SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','stopping','pausing')"
+                "UPDATE registration_batches SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','waiting','stopping','pausing')"
             )
             conn.execute(
                 "UPDATE registration_jobs SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')"
             )
             conn.execute(
-                "UPDATE operation_jobs SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','stopping','pausing')"
+                "UPDATE operation_jobs SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','waiting','stopping','pausing')"
             )
             conn.execute(
-                "UPDATE operation_items SET status='interrupted',message=CASE WHEN message='' THEN 'service restarted' ELSE message END WHERE status IN ('queued','running') AND operation_id IN (SELECT id FROM operation_jobs WHERE status='interrupted')"
+                "UPDATE operation_items SET status='interrupted',message=CASE WHEN message='' THEN 'service restarted' ELSE message END WHERE status IN ('queued','running','waiting') AND operation_id IN (SELECT id FROM operation_jobs WHERE status='interrupted')"
             )
             interrupted_account_statuses = (
                 ("oidc_status", "oidc_error", ("oidc",)),
@@ -236,7 +236,7 @@ class Database:
                     SET {status_field}='interrupted',
                         {error_field}=COALESCE(NULLIF({error_field}, ''), 'service restarted'),
                         updated_at=CURRENT_TIMESTAMP
-                    WHERE {status_field}='running' AND EXISTS (
+                    WHERE {status_field} IN ('running','waiting') AND EXISTS (
                         SELECT 1 FROM operation_items item
                         JOIN operation_jobs job ON job.id=item.operation_id
                         WHERE item.account_id=accounts.id
@@ -289,7 +289,7 @@ class Database:
                     success=(SELECT COUNT(*) FROM operation_items item WHERE item.operation_id=operation_jobs.id AND item.status IN ('success','resolved')),
                     failed=(SELECT COUNT(*) FROM operation_items item WHERE item.operation_id=operation_jobs.id AND item.status IN ('failed','interrupted')),
                     status=CASE
-                        WHEN operation_jobs.status IN ('queued','running','stopping','pausing','paused') THEN operation_jobs.status
+                        WHEN operation_jobs.status IN ('queued','running','waiting','stopping','pausing','paused') THEN operation_jobs.status
                         WHEN NOT EXISTS (SELECT 1 FROM operation_items item WHERE item.operation_id=operation_jobs.id AND item.status IN ('failed','interrupted')) THEN 'resolved'
                         WHEN operation_jobs.status='retried' THEN 'retried'
                         WHEN EXISTS (SELECT 1 FROM operation_items item WHERE item.operation_id=operation_jobs.id AND item.status IN ('success','resolved')) THEN 'partial'

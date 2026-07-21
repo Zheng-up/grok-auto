@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -32,6 +32,8 @@ _REMOTE_COOLDOWN = threading.Condition()
 _REMOTE_COOLDOWN_UNTIL = 0.0
 _REMOTE_SLOTS = threading.Condition()
 _REMOTE_ACTIVE = 0
+_REMOTE_ACCESS_TTL_SECONDS = 14 * 60.0
+_REMOTE_LOGIN_COOLDOWN_SECONDS = 65
 
 
 class RemoteRateLimitedError(RuntimeError):
@@ -39,6 +41,8 @@ class RemoteRateLimitedError(RuntimeError):
 
 
 def _is_rate_limited(exc: Exception) -> bool:
+    if bool(getattr(exc, "remote_rate_limited", False)):
+        return True
     response = getattr(exc, "response", None)
     if getattr(response, "status_code", None) == 429:
         return True
@@ -46,6 +50,16 @@ def _is_rate_limited(exc: Exception) -> bool:
     return bool(re.search(r"(?<!\d)429(?!\d)", message)) or any(
         marker in message for marker in ("too many requests", "rate limit", "rate_limited")
     )
+
+
+def _rate_limit_cooldown(exc: Exception) -> int:
+    explicit = getattr(exc, "remote_cooldown_seconds", None)
+    if explicit is not None:
+        return max(1, int(explicit))
+    response = getattr(exc, "response", None)
+    request = getattr(response, "request", None)
+    path = str(getattr(getattr(request, "url", None), "path", ""))
+    return 65 if path.endswith("/api/admin/v1/auth/login") else int(_REMOTE_COOLDOWN_SECONDS)
 
 
 def _normalize_sso(value: str) -> str:
@@ -105,6 +119,100 @@ def _parse_sse(response: httpx.Response) -> dict[str, Any]:
     return complete
 
 
+class RemoteAdminSession:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._client = httpx.Client(timeout=30, follow_redirects=True)
+        self._identity: tuple[str, str, str] | None = None
+        self._access_token = ""
+        self._access_expires_at = 0.0
+        self._login_blocked_until = 0.0
+
+    def _reset(self, identity: tuple[str, str, str]) -> None:
+        self._identity = identity
+        self._access_token = ""
+        self._access_expires_at = 0.0
+        self._login_blocked_until = 0.0
+        self._client.cookies.clear()
+
+    @staticmethod
+    def _token(payload: Any) -> str:
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        tokens = data.get("tokens") if isinstance(data, dict) else {}
+        access = str(tokens.get("accessToken") or "") if isinstance(tokens, dict) else ""
+        if not access:
+            raise RuntimeError("远端认证响应缺少 accessToken")
+        return access
+
+    def _login(self, origin: str, username: str, secret: str) -> str:
+        remaining = self._login_blocked_until - time.monotonic()
+        if remaining > 0:
+            exc = RemoteRateLimitedError(
+                f"管理员登录仍在限流窗口，等待 {max(1, round(remaining))} 秒后重试"
+            )
+            exc.remote_cooldown_seconds = max(1, round(remaining))
+            raise exc
+        response = self._client.post(
+            f"{origin}/api/admin/v1/auth/login",
+            json={"username": username, "password": secret},
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if response.status_code == 429:
+                self._login_blocked_until = (
+                    time.monotonic() + _REMOTE_LOGIN_COOLDOWN_SECONDS
+                )
+                exc.remote_cooldown_seconds = _REMOTE_LOGIN_COOLDOWN_SECONDS
+            raise
+        self._login_blocked_until = 0.0
+        return self._token(response.json())
+
+    def _refresh(self, origin: str) -> str | None:
+        response = self._client.post(
+            f"{origin}/api/admin/v1/auth/refresh",
+            json={},
+        )
+        if response.status_code == 401:
+            return None
+        response.raise_for_status()
+        return self._token(response.json())
+
+    def access_token(
+        self,
+        cfg: dict[str, Any],
+        *,
+        force_refresh: bool = False,
+        stale_token: str = "",
+    ) -> tuple[str, str]:
+        origin = _admin_origin(str(cfg["remote_base_url"]))
+        username = str(cfg.get("remote_username") or "admin")
+        secret = str(cfg["remote_secret"])
+        identity = (origin, username, secret)
+        with self._lock:
+            if self._identity != identity:
+                self._reset(identity)
+            now = time.monotonic()
+            if force_refresh and stale_token and self._access_token != stale_token and self._access_token:
+                return origin, self._access_token
+            if self._access_token and not force_refresh and now < self._access_expires_at:
+                return origin, self._access_token
+            access = self._refresh(origin) if self._client.cookies else None
+            if not access:
+                access = self._login(origin, username, secret)
+            self._access_token = access
+            self._access_expires_at = time.monotonic() + _REMOTE_ACCESS_TTL_SECONDS
+            return origin, access
+
+    def close(self) -> None:
+        with self._lock:
+            self._client.close()
+            self._identity = None
+            self._access_token = ""
+            self._access_expires_at = 0.0
+            self._login_blocked_until = 0.0
+
+
 class RemotePoolService:
     def __init__(
         self,
@@ -115,6 +223,8 @@ class RemotePoolService:
         self.accounts = accounts
         self.settings = settings
         self.events = events
+        self.on_waiting_changed: Callable[[str, bool], None] | None = None
+        self._auth = RemoteAdminSession()
 
     def _config(self) -> dict[str, Any]:
         cfg = self.settings.registration_config()
@@ -142,6 +252,8 @@ class RemotePoolService:
             remaining = _REMOTE_COOLDOWN_UNTIL - time.monotonic()
         if remaining <= 0:
             return
+        if self.on_waiting_changed:
+            self.on_waiting_changed(stream_id, True)
         self.events.publish(
             stream_id,
             f"[!] 远端入池触发全局限流，等待 {max(1, round(remaining))} 秒后继续",
@@ -151,41 +263,39 @@ class RemotePoolService:
             while True:
                 remaining = _REMOTE_COOLDOWN_UNTIL - time.monotonic()
                 if remaining <= 0:
+                    if self.on_waiting_changed:
+                        self.on_waiting_changed(stream_id, False)
                     return
                 _REMOTE_COOLDOWN.wait(timeout=remaining)
 
-    def _activate_cooldown(self, stream_id: str) -> None:
+    def retry_waiting(self, stream_id: str) -> bool:
+        global _REMOTE_COOLDOWN_UNTIL
+        with _REMOTE_COOLDOWN:
+            was_waiting = _REMOTE_COOLDOWN_UNTIL > time.monotonic()
+            _REMOTE_COOLDOWN_UNTIL = time.monotonic()
+            _REMOTE_COOLDOWN.notify_all()
+        self.events.publish(
+            stream_id,
+            "[*] 已手动解除远端限流等待，所有远端任务立即重试",
+            "warning",
+        )
+        return was_waiting
+
+    def _activate_cooldown(self, stream_id: str, seconds: int) -> None:
         global _REMOTE_COOLDOWN_UNTIL
         with _REMOTE_COOLDOWN:
             _REMOTE_COOLDOWN_UNTIL = max(
                 _REMOTE_COOLDOWN_UNTIL,
-                time.monotonic() + _REMOTE_COOLDOWN_SECONDS,
+                time.monotonic() + seconds,
             )
             _REMOTE_COOLDOWN.notify_all()
+        if self.on_waiting_changed:
+            self.on_waiting_changed(stream_id, True)
         self.events.publish(
             stream_id,
-            "[!] 远端返回 429，所有远端入池操作统一等待 30 秒",
+            f"[!] 远端返回 429，所有远端入池操作统一等待 {seconds} 秒",
             "warning",
         )
-
-    @staticmethod
-    def _login(client: httpx.Client, cfg: dict[str, Any]) -> tuple[str, str]:
-        origin = _admin_origin(str(cfg["remote_base_url"]))
-        response = client.post(
-            f"{origin}/api/admin/v1/auth/login",
-            json={
-                "username": str(cfg.get("remote_username") or "admin"),
-                "password": str(cfg["remote_secret"]),
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        data = payload.get("data") if isinstance(payload, dict) else {}
-        tokens = data.get("tokens") if isinstance(data, dict) else {}
-        access = str(tokens.get("accessToken") or "") if isinstance(tokens, dict) else ""
-        if not access:
-            raise RuntimeError("远端登录响应缺少 accessToken")
-        return origin, access
 
     @staticmethod
     def _upload(
@@ -213,7 +323,7 @@ class RemotePoolService:
             raise ValueError("不支持的远端入池类型")
         status_field = _STATUS_FIELDS[selected_mode]
         mode_label = _MODE_LABELS[selected_mode]
-        concurrency = max(1, min(int(cfg.get("remote_operation_concurrency", 4) or 4), 10))
+        concurrency = max(1, min(int(cfg.get("remote_operation_concurrency", 4) or 4), 50))
         self.wait_for_cooldown(stream_id)
         self._acquire_remote_slot(concurrency)
         try:
@@ -221,26 +331,44 @@ class RemotePoolService:
             self.wait_for_cooldown(stream_id)
             self.accounts.set_status(account_id, status_field, "running")
             self.events.publish(stream_id, f"[*] 开始{mode_label}：{account['email']}")
+            access = ""
             try:
+                origin, access = self._auth.access_token(cfg)
+                endpoint = f"{origin}{_IMPORT_PATHS[selected_mode]}"
+                filename, content = self._import_file(selected_mode, account)
                 with httpx.Client(timeout=120, follow_redirects=True) as client:
-                    origin, access = self._login(client, cfg)
-                    endpoint = f"{origin}{_IMPORT_PATHS[selected_mode]}"
-                    filename, content = self._import_file(selected_mode, account)
-                    result = self._upload(client, endpoint, access, filename, content)
+                    try:
+                        result = self._upload(client, endpoint, access, filename, content)
+                    except httpx.HTTPStatusError as upload_exc:
+                        if upload_exc.response.status_code != 401:
+                            raise
+                        origin, access = self._auth.access_token(
+                            cfg,
+                            force_refresh=True,
+                            stale_token=access,
+                        )
+                        endpoint = f"{origin}{_IMPORT_PATHS[selected_mode]}"
+                        result = self._upload(client, endpoint, access, filename, content)
                 self.accounts.set_status(account_id, status_field, "success")
                 self.events.publish(stream_id, f"[+] {mode_label}成功：{account['email']}", "success")
                 return {"mode": selected_mode, "endpoint": endpoint, "result": result}
             except Exception as exc:
                 if _is_rate_limited(exc):
-                    self._activate_cooldown(stream_id)
+                    cooldown_seconds = _rate_limit_cooldown(exc)
+                    self._activate_cooldown(stream_id, cooldown_seconds)
                     self.accounts.set_status(
                         account_id,
                         status_field,
-                        "queued",
-                        "远端限流，等待 30 秒后重试",
+                        "waiting",
+                        f"远端限流，等待 {cooldown_seconds} 秒后重试",
                     )
-                    raise RemoteRateLimitedError("远端限流，等待 30 秒后重试") from exc
-                safe_error = redact_error(exc, (cfg.get("remote_secret"), account.get("sso")))
+                    raise RemoteRateLimitedError(
+                        f"远端限流，等待 {cooldown_seconds} 秒后重试"
+                    ) from exc
+                safe_error = redact_error(
+                    exc,
+                    (cfg.get("remote_secret"), account.get("sso"), access),
+                )
                 self.accounts.set_status(account_id, status_field, "failed", safe_error)
                 self.events.publish(stream_id, f"[-] {mode_label}失败：{account['email']}：{safe_error}", "error")
                 raise RuntimeError(safe_error) from exc
@@ -278,9 +406,11 @@ class RemotePoolService:
     def test_connection(self) -> dict[str, Any]:
         cfg = self._config()
         try:
-            with httpx.Client(timeout=15, follow_redirects=True) as client:
-                origin, _ = self._login(client, cfg)
-            return {"ok": True, "mode": "admin", "endpoint": f"{origin}/api/admin/v1/auth/login"}
+            origin, _ = self._auth.access_token(cfg, force_refresh=True)
+            return {"ok": True, "mode": "admin", "endpoint": f"{origin}/api/admin/v1/auth/refresh"}
         except Exception as exc:
             safe_error = redact_error(exc, (cfg.get("remote_secret"),))
             return {"ok": False, "mode": "admin", "error": safe_error}
+
+    def close(self) -> None:
+        self._auth.close()

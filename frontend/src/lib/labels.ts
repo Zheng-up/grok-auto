@@ -1,6 +1,7 @@
 const STATUS_LABELS: Record<string, string> = {
   queued: '排队中',
   running: '进行中',
+  waiting: '等待中',
   stopping: '停止中',
   pausing: '暂停中',
   paused: '已暂停',
@@ -31,6 +32,7 @@ const REMOTE_STATUS_LABELS: Record<string, string> = {
   not_pushed: '未入池',
   pending: '未入池',
   queued: '入池排队中',
+  waiting: '限流等待中',
   running: '入池中',
   stopping: '停止中',
   success: '已入池',

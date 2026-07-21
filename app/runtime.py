@@ -28,6 +28,7 @@ class ApplicationServices:
         self.oidc = OidcService(self.accounts, self.settings, self.events)
         self.remote = RemotePoolService(self.accounts, self.settings, self.events)
         self.operations = OperationManager(self.db, self.events, self.settings)
+        self.remote.on_waiting_changed = self.operations.set_remote_waiting
         self.operations.register("oidc", lambda account_id, stream: self.oidc.mint(account_id, stream))
         self.operations.register("remote_sso", lambda account_id, stream: self.remote.push(account_id, "web", stream), before=self.remote.wait_for_cooldown)
         self.operations.register("remote_web", lambda account_id, stream: self.remote.push(account_id, "web", stream), before=self.remote.wait_for_cooldown)
@@ -49,6 +50,7 @@ class ApplicationServices:
     def close(self) -> None:
         self.registration.close()
         self.operations.close()
+        self.remote.close()
 
 
 services = ApplicationServices()

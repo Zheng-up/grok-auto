@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
-  LayoutDashboard,
   ListChecks,
   LogOut,
   Menu,
@@ -22,8 +21,7 @@ import { api } from '../lib/api'
 import { GlobalTaskStatus } from './global-task-status'
 
 const nav = [
-  { to: '/', label: '仪表盘', icon: LayoutDashboard },
-  { to: '/register', label: '开始注册', icon: Play },
+  { to: '/', label: '开始注册', icon: Play },
   { to: '/accounts', label: '账号管理', icon: Database },
   { to: '/tasks', label: '任务日志', icon: ListChecks },
   { to: '/settings', label: '系统设置', icon: Settings },
@@ -35,7 +33,7 @@ export function AppShell() {
   const { theme, setTheme } = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
-  const fixedViewport = location.pathname === '/register'
+  const fixedViewport = location.pathname === '/'
 
   const toggleCollapsed = () => {
     setCollapsed((current) => {

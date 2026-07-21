@@ -35,7 +35,7 @@ class EventLog:
             "SELECT COUNT(*) total FROM registration_batches WHERE status IN ('queued','running','stopping','pausing','paused')"
         ) or {}
         active_operations = self.db.fetch_one(
-            "SELECT COUNT(*) total FROM operation_jobs WHERE status IN ('queued','running','stopping','pausing','paused')"
+            "SELECT COUNT(*) total FROM operation_jobs WHERE status IN ('queued','running','waiting','stopping','pausing','paused')"
         ) or {}
         if int(active_batches.get("total") or 0) or int(active_operations.get("total") or 0):
             raise ValueError("running tasks must finish or stop before clearing history")

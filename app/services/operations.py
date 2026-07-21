@@ -68,7 +68,7 @@ class OperationManager:
                 SELECT job.id,COUNT(DISTINCT item.account_id) matched
                 FROM operation_items item
                 JOIN operation_jobs job ON job.id=item.operation_id
-                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','stopping','pausing','paused')
+                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','waiting','stopping','pausing','paused')
                   AND job.total=? AND item.account_id IN ({placeholders})
                 GROUP BY job.id
                 HAVING matched=?
@@ -84,7 +84,7 @@ class OperationManager:
                 f"""
                 SELECT 1 FROM operation_items item
                 JOIN operation_jobs job ON job.id=item.operation_id
-                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','stopping','pausing','paused')
+                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','waiting','stopping','pausing','paused')
                   AND item.account_id IN ({placeholders})
                 LIMIT 1
                 """,
@@ -120,7 +120,7 @@ class OperationManager:
 
     def stop(self, operation_id: str) -> bool:
         operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
-        if not operation or operation["status"] not in {"queued", "running", "stopping", "pausing", "paused"}:
+        if not operation or operation["status"] not in {"queued", "running", "waiting", "stopping", "pausing", "paused"}:
             return False
         if operation["status"] == "paused":
             with self.db.transaction() as conn:
@@ -213,6 +213,41 @@ class OperationManager:
         except Exception as exc:
             self.events.publish(account_id, f"[-] 无法创建 {kind} 操作：{exc}", "error")
 
+    def set_remote_waiting(self, operation_id: str, waiting: bool) -> None:
+        if not operation_id.startswith("op_"):
+            return
+        changed = False
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM operation_jobs WHERE id=?",
+                (operation_id,),
+            ).fetchone()
+            if not row:
+                return
+            current = str(row["status"])
+            if waiting and current in {"queued", "running"}:
+                conn.execute(
+                    "UPDATE operation_jobs SET status='waiting',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (operation_id,),
+                )
+                conn.execute(
+                    "UPDATE operation_items SET status='waiting',message='远端限流，等待冷却结束' WHERE operation_id=? AND status='running'",
+                    (operation_id,),
+                )
+                changed = True
+            elif not waiting and current == "waiting":
+                conn.execute(
+                    "UPDATE operation_jobs SET status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (operation_id,),
+                )
+                conn.execute(
+                    "UPDATE operation_items SET status='running',message='' WHERE operation_id=? AND status='waiting'",
+                    (operation_id,),
+                )
+                changed = True
+        if changed and not waiting:
+            self.events.publish(operation_id, "[*] 远端限流等待结束，任务继续执行")
+
     def _acquire_slot(self, limit: int, cancel: threading.Event, pause: threading.Event) -> bool:
         with self._slots:
             while self._active_items >= limit:
@@ -248,6 +283,10 @@ class OperationManager:
                 return "queued", "等待继续"
             if before:
                 before(operation_id)
+                if cancel.is_set():
+                    return "cancelled", "任务已取消"
+                if pause.is_set():
+                    return "queued", "等待继续"
             uses_local_slot = before is None
             if uses_local_slot and not self._acquire_slot(concurrency, cancel, pause):
                 return ("cancelled", "任务开始前已取消") if cancel.is_set() else ("queued", "等待继续")
@@ -467,7 +506,7 @@ class OperationManager:
         operation = self.get(operation_id)
         if not operation:
             raise ValueError("operation not found")
-        if operation["status"] in {"queued", "running", "stopping", "pausing", "paused"}:
+        if operation["status"] in {"queued", "running", "waiting", "stopping", "pausing", "paused"}:
             raise ValueError("running operation cannot be retried")
         retryable_ids = [
             item["account_id"]

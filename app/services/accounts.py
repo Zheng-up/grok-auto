@@ -102,7 +102,7 @@ class AccountService:
                        FROM operation_items item
                        JOIN operation_jobs job ON job.id=item.operation_id
                        WHERE item.account_id=a.id
-                         AND job.status IN ('queued','running','stopping','pausing','paused')
+                         AND job.status IN ('queued','running','waiting','stopping','pausing','paused')
                    ), '') active_operations_csv
             FROM accounts a {where}
             ORDER BY a.created_at DESC LIMIT ? OFFSET ?

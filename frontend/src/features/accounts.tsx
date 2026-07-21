@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, CloudUpload, Download, KeyRound, ListFilter, RefreshCw, Search, Trash2, X } from 'lucide-react'
+import { ChevronRight, CloudUpload, Download, KeyRound, ListFilter, RefreshCw, Search, Server, Trash2, Users, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, download } from '../lib/api'
-import type { Account, Operation } from '../lib/types'
+import type { Account, Dashboard, Operation } from '../lib/types'
 import { authStatusLabel, operationLabel, remoteStatusLabel } from '../lib/labels'
 import { Badge, Button, Card, Empty, Input, PageHeader, PaginationBar, Spinner } from '../components/ui'
 
@@ -70,6 +70,7 @@ const statusTone = (value: string) => {
   if (normalized === 'success') return 'bg-emerald-500'
   if (['failed', 'error'].includes(normalized)) return 'bg-red-500'
   if (['running', 'queued', 'stopping'].includes(normalized)) return 'bg-amber-400'
+  if (normalized === 'waiting') return 'bg-sky-500'
   return 'bg-neutral-400'
 }
 
@@ -227,6 +228,7 @@ function ExportDialog({ selectedCount, pending, onClose, onSubmit }: { selectedC
 
 export function AccountsPage() {
   const client = useQueryClient()
+  const dashboard = useQuery({ queryKey: ['dashboard'], queryFn: () => api<Dashboard>('/api/dashboard'), refetchInterval: 5000 })
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filters, setFilters] = useState<AccountFilters>(EMPTY_FILTERS)
@@ -332,9 +334,21 @@ export function AccountsPage() {
     setSelected(new Set())
   }
   const activeFilterCount = Object.values(filters).filter(Boolean).length
+  const accountSummary = dashboard.data?.accounts
+  const readiness = (ready: number | undefined) => accountSummary?.total
+    ? `${Math.round(((ready ?? 0) / accountSummary.total) * 100)}% 就绪`
+    : '暂无账号'
 
   return <>
     <PageHeader title="账号管理" />
+
+    <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <AccountMetric icon={Users} label="账号总数" value={accountSummary?.total ?? 0} detail="本地已保存" tone="neutral" />
+      <AccountMetric icon={KeyRound} label="auths 可用" value={accountSummary?.oidc_ready ?? 0} detail={readiness(accountSummary?.oidc_ready)} tone="sky" />
+      <AccountMetric icon={CloudUpload} label="SSO 已入池" value={accountSummary?.remote_web_ready ?? 0} detail={readiness(accountSummary?.remote_web_ready)} tone="emerald" />
+      <AccountMetric icon={Server} label="Build 已入池" value={accountSummary?.remote_build_ready ?? 0} detail={readiness(accountSummary?.remote_build_ready)} tone="violet" />
+      <AccountMetric icon={Server} label="Console 已入池" value={accountSummary?.remote_console_ready ?? 0} detail={readiness(accountSummary?.remote_console_ready)} tone="amber" />
+    </div>
 
     <Card>
       <div className="grid gap-3 border-b p-4 xl:grid-cols-[minmax(260px,1fr)_auto] xl:items-center">
@@ -425,4 +439,21 @@ export function AccountsPage() {
       onSubmit={(kind, accountIds) => operation.mutate({ kind, accountIds })}
     />}
   </>
+}
+
+function AccountMetric({ icon: Icon, label, value, detail, tone }: { icon: typeof Users; label: string; value: number; detail: string; tone: 'neutral' | 'sky' | 'emerald' | 'violet' | 'amber' }) {
+  const tones = {
+    neutral: 'border-neutral-200 bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900',
+    sky: 'border-sky-200 bg-sky-50 dark:border-sky-900 dark:bg-sky-950',
+    emerald: 'border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950',
+    violet: 'border-violet-200 bg-violet-50 dark:border-violet-900 dark:bg-violet-950',
+    amber: 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950',
+  }
+  return <section className={`min-h-[68px] rounded-xl border px-3.5 py-2 ${tones[tone]}`}>
+    <div className="flex items-center justify-between gap-3">
+      <span className="muted text-[11px] font-medium">{label}</span>
+      <Icon size={14} className="muted" />
+    </div>
+    <div className="mt-1 flex items-end justify-between gap-2"><strong className="text-xl tracking-tight">{value}</strong><span className="muted pb-0.5 text-[10px]">{detail}</span></div>
+  </section>
 }

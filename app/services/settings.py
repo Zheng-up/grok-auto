@@ -36,7 +36,7 @@ INT_RANGES = {
     "registration_concurrency": (1, 50),
     "registration_retry_limit": (0, 5),
     "mail_poll_timeout": (30, 600),
-    "remote_operation_concurrency": (1, 10),
+    "remote_operation_concurrency": (1, 50),
 }
 CHOICES = {
     "mail_provider": {"cfmail", "moemail", "yyds", "gptmail", "tempmail"},

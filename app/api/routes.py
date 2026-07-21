@@ -104,7 +104,7 @@ def dashboard(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
         """
         SELECT
           (SELECT COUNT(*) FROM registration_batches WHERE status IN ('queued','running','stopping','pausing','paused')) active_batches,
-          (SELECT COUNT(*) FROM operation_jobs WHERE status IN ('queued','running','stopping','pausing','paused')) active_operations
+          (SELECT COUNT(*) FROM operation_jobs WHERE status IN ('queued','running','waiting','stopping','pausing','paused')) active_operations
         """
     ) or {}
     return {
@@ -320,6 +320,20 @@ def stop_operation(
 ) -> dict[str, Any]:
     if not services.operations.stop(operation_id):
         raise HTTPException(status_code=409, detail="operation is not running")
+    return {"ok": True}
+
+
+@router.post("/operations/{operation_id}/retry-waiting")
+def retry_waiting_operation(
+    operation_id: str,
+    _: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    operation = services.operations.get(operation_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="operation not found")
+    if operation["status"] != "waiting":
+        raise HTTPException(status_code=409, detail="operation is not waiting")
+    services.remote.retry_waiting(operation_id)
     return {"ok": True}
 
 

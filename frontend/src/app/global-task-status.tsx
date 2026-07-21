@@ -8,10 +8,11 @@ import type { Batch, Operation } from '../lib/types'
 import { Badge } from '../components/ui'
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'stopping', 'pausing'])
+const WAITING_STATUSES = new Set(['waiting'])
 const PAUSED_STATUSES = new Set(['paused'])
 const FAILED_STATUSES = new Set(['failed', 'partial', 'interrupted'])
-const WORKSPACE_STATUSES = new Set([...ACTIVE_STATUSES, ...PAUSED_STATUSES, ...FAILED_STATUSES])
-const STATUS_ORDER: Record<string, number> = { running: 0, stopping: 1, pausing: 1, queued: 2, paused: 3, failed: 4, partial: 4, interrupted: 4 }
+const WORKSPACE_STATUSES = new Set([...ACTIVE_STATUSES, ...WAITING_STATUSES, ...PAUSED_STATUSES, ...FAILED_STATUSES])
+const STATUS_ORDER: Record<string, number> = { running: 0, stopping: 1, pausing: 1, waiting: 2, queued: 3, paused: 4, failed: 5, partial: 5, interrupted: 5 }
 
 type TaskSpaceTask = {
   id: string
@@ -47,9 +48,10 @@ export function GlobalTaskStatus() {
   const tasks = query.data ?? []
   const queuedCount = tasks.filter((task) => task.status === 'queued').length
   const runningCount = tasks.filter((task) => ['running', 'stopping', 'pausing'].includes(task.status)).length
+  const waitingCount = tasks.filter((task) => task.status === 'waiting').length
   const pausedCount = tasks.filter((task) => task.status === 'paused').length
   const failedCount = tasks.filter((task) => FAILED_STATUSES.has(task.status)).length
-  const activeCount = queuedCount + runningCount
+  const activeCount = queuedCount + runningCount + waitingCount
 
   const createRetry = async (task: TaskSpaceTask) => {
     const endpoint = task.kind === 'batch'
@@ -59,13 +61,16 @@ export function GlobalTaskStatus() {
     if (task.kind === 'batch') localStorage.setItem('active-registration-batch', retried.id)
   }
 
+  const retryWaiting = (task: TaskSpaceTask) => api<{ ok: boolean }>(`/api/operations/${task.id}/retry-waiting`, { method: 'POST' })
+
   const retry = async (task: TaskSpaceTask) => {
     if (retrying || controlling) return
     setRetrying(task.id)
     try {
-      await createRetry(task)
+      if (task.status === 'waiting') await retryWaiting(task)
+      else await createRetry(task)
       await query.refetch()
-      toast.success('重试任务已创建')
+      toast.success(task.status === 'waiting' ? '已解除限流等待，远端任务立即重试' : '重试任务已创建')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '任务重试失败')
     } finally {
@@ -76,11 +81,20 @@ export function GlobalTaskStatus() {
   const retryAll = async () => {
     if (retrying || controlling) return
     const retryable = tasks.filter((task) => FAILED_STATUSES.has(task.status))
-    if (!retryable.length) return
+    const waitingTask = tasks.find((task) => task.status === 'waiting')
+    if (!retryable.length && !waitingTask) return
     setRetrying('all')
     let succeeded = 0
     let failed = 0
     try {
+      if (waitingTask) {
+        try {
+          await retryWaiting(waitingTask)
+          succeeded += waitingCount
+        } catch {
+          failed += waitingCount
+        }
+      }
       for (const task of retryable) {
         try {
           await createRetry(task)
@@ -140,6 +154,30 @@ export function GlobalTaskStatus() {
     else toast.success(`已依次暂停 ${succeeded} 个任务`)
   }
 
+  const resumeAll = async () => {
+    if (controlling || retrying) return
+    const resumable = tasks.filter((task) => task.status === 'paused')
+    if (!resumable.length) return
+    setControlling('all')
+    let succeeded = 0
+    let failed = 0
+    try {
+      for (const task of resumable) {
+        try {
+          await controlTask(task, 'resume')
+          succeeded += 1
+        } catch {
+          failed += 1
+        }
+      }
+      await query.refetch()
+    } finally {
+      setControlling(undefined)
+    }
+    if (failed) toast.warning(`批量启动完成：成功 ${succeeded}，失败 ${failed}`)
+    else toast.success(`已启动 ${succeeded} 个暂停任务`)
+  }
+
   useEffect(() => {
     if (!open) return
     const closeOutside = (event: MouseEvent) => {
@@ -165,19 +203,28 @@ export function GlobalTaskStatus() {
       aria-hidden={!open}
       inert={!open}
     >
-      <div className="flex shrink-0 items-center justify-between border-b px-4 py-3"><div><h2 className="text-sm font-medium">任务空间</h2><div className="muted mt-1 flex items-center gap-3 text-[11px]"><span>待执行 {queuedCount}</span><span>执行中 {runningCount}</span><span>已暂停 {pausedCount}</span><span className={failedCount ? 'text-red-600 dark:text-red-400' : ''}>失败 {failedCount}</span></div></div><div className="flex items-center gap-2"><button type="button" className="inline-flex h-8 items-center gap-1.5 rounded-md border bg-[var(--panel)] px-2.5 text-xs font-medium transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!tasks.some((task) => ['queued', 'running'].includes(task.status)) || Boolean(controlling) || Boolean(retrying)} onClick={() => void pauseAll()}><Pause size={13} />全部暂停</button><button type="button" className="inline-flex h-8 items-center gap-1.5 rounded-md border bg-[var(--panel)] px-2.5 text-xs font-medium transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!failedCount || Boolean(retrying) || Boolean(controlling)} onClick={() => void retryAll()}><RotateCcw className={retrying === 'all' ? 'animate-spin' : ''} size={13} />全部重试</button><button type="button" className="rounded-md p-1.5 hover:bg-[var(--soft)]" onClick={() => setOpen(false)} aria-label="关闭"><X size={16} /></button></div></div>
+      <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
+        <div><h2 className="text-sm font-medium">任务空间</h2><div className="muted mt-1 flex items-center gap-3 text-[11px]"><span>待执行 {queuedCount}</span><span>执行中 {runningCount}</span><span className={waitingCount ? 'text-sky-600 dark:text-sky-400' : ''}>等待中 {waitingCount}</span><span>已暂停 {pausedCount}</span><span className={failedCount ? 'text-red-600 dark:text-red-400' : ''}>失败 {failedCount}</span></div></div>
+        <div className="flex items-center gap-1">
+          <button type="button" className="inline-flex h-7 items-center gap-1 rounded-md border bg-[var(--panel)] px-2 text-[10px] font-medium transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!tasks.some((task) => ['queued', 'running'].includes(task.status)) || Boolean(controlling) || Boolean(retrying)} onClick={() => void pauseAll()}><Pause size={12} />暂停</button>
+          <button type="button" className="inline-flex h-7 items-center gap-1 rounded-md border bg-[var(--panel)] px-2 text-[10px] font-medium transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!pausedCount || Boolean(controlling) || Boolean(retrying)} onClick={() => void resumeAll()}><Play size={12} />启动</button>
+          <button type="button" className="inline-flex h-7 items-center gap-1 rounded-md border bg-[var(--panel)] px-2 text-[10px] font-medium transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={(!failedCount && !waitingCount) || Boolean(retrying) || Boolean(controlling)} onClick={() => void retryAll()}><RotateCcw className={retrying === 'all' ? 'animate-spin' : ''} size={12} />重试</button>
+          <button type="button" className="rounded-md p-1 hover:bg-[var(--soft)]" onClick={() => setOpen(false)} aria-label="关闭"><X size={14} /></button>
+        </div>
+      </div>
       <div className="scrollbar min-h-0 flex-1 overflow-auto">
         {tasks.length ? <div className="divide-y">{tasks.map((task) => {
           const progress = Math.round((task.completed / Math.max(1, task.total)) * 100)
           const active = ACTIVE_STATUSES.has(task.status)
+          const waiting = WAITING_STATUSES.has(task.status)
           const failed = FAILED_STATUSES.has(task.status)
           const pausable = ['queued', 'running'].includes(task.status)
           const resumable = task.status === 'paused'
           return <div key={task.id} className="px-4 py-2.5">
-            <div className="flex items-center gap-3"><span className="w-20 shrink-0 text-xs font-medium">{task.label}</span><span className="muted min-w-0 flex-1 truncate font-mono text-[10px]">{task.id}</span><span className="muted shrink-0 text-[11px]">{task.completed}/{task.total} · {progress}%</span><Badge value={task.status} />{pausable && <button type="button" className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border bg-[var(--panel)] transition hover:bg-[var(--soft)] disabled:opacity-50" disabled={Boolean(controlling) || Boolean(retrying)} onClick={() => void control(task, 'pause')} aria-label={`暂停${task.label}`} title="暂停"><Pause size={13} /></button>}{resumable && <button type="button" className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border bg-[var(--panel)] transition hover:bg-[var(--soft)] disabled:opacity-50" disabled={Boolean(controlling) || Boolean(retrying)} onClick={() => void control(task, 'resume')} aria-label={`继续${task.label}`} title="继续"><Play size={13} /></button>}{failed && <button type="button" className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border bg-[var(--panel)] transition hover:bg-[var(--soft)] disabled:opacity-50" disabled={Boolean(retrying) || Boolean(controlling)} onClick={() => void retry(task)} aria-label={`重试${task.label}`} title="重试"><RotateCcw className={retrying === task.id ? 'animate-spin' : ''} size={13} /></button>}</div>
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--soft)]"><div className={`h-full rounded-full transition-all ${active ? 'bg-amber-500' : resumable ? 'bg-sky-500' : 'bg-red-500'}`} style={{ width: `${progress}%` }} /></div>
+            <div className="flex items-center gap-3"><span className="w-20 shrink-0 text-xs font-medium">{task.label}</span><span className="muted min-w-0 flex-1 truncate font-mono text-[10px]">{task.id}</span><span className="muted shrink-0 text-[11px]">{task.completed}/{task.total} · {progress}%</span><Badge value={task.status} />{pausable && <button type="button" className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border bg-[var(--panel)] transition hover:bg-[var(--soft)] disabled:opacity-50" disabled={Boolean(controlling) || Boolean(retrying)} onClick={() => void control(task, 'pause')} aria-label={`暂停${task.label}`} title="暂停"><Pause size={13} /></button>}{resumable && <button type="button" className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border bg-[var(--panel)] transition hover:bg-[var(--soft)] disabled:opacity-50" disabled={Boolean(controlling) || Boolean(retrying)} onClick={() => void control(task, 'resume')} aria-label={`继续${task.label}`} title="继续"><Play size={13} /></button>}{(waiting || failed) && <button type="button" className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border bg-[var(--panel)] transition hover:bg-[var(--soft)] disabled:opacity-50" disabled={Boolean(retrying) || Boolean(controlling)} onClick={() => void retry(task)} aria-label={`重试${task.label}`} title={waiting ? '立即重试' : '重试'}><RotateCcw className={retrying === task.id ? 'animate-spin' : ''} size={13} /></button>}</div>
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--soft)]"><div className={`h-full rounded-full transition-all ${waiting ? 'bg-sky-500' : active ? 'bg-amber-500' : resumable ? 'bg-sky-500' : 'bg-red-500'}`} style={{ width: `${progress}%` }} /></div>
           </div>
-        })}</div> : <div className="muted flex h-full min-h-40 items-center justify-center px-4 text-center text-sm">当前没有待执行、执行中或失败的任务</div>}
+        })}</div> : <div className="muted flex h-full min-h-40 items-center justify-center px-4 text-center text-sm">当前没有待执行、等待中、执行中或失败的任务</div>}
       </div>
     </div>
 

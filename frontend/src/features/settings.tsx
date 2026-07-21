@@ -99,7 +99,7 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
           <Field label="Base URL"><Input value={String(form.remote_base_url ?? '')} onChange={(event) => set('remote_base_url', event.target.value)} placeholder="https://grok2api.example.com" /></Field>
           <Field label="管理员用户名"><Input value={String(form.remote_username ?? '')} onChange={(event) => set('remote_username', event.target.value)} /></Field>
           <Field label="密码 / App Key" hint={configured('remote_secret') ? '已配置，点击眼睛查看' : '尚未配置'}><SecretControl value={String(form.remote_secret ?? '')} onChange={(value) => set('remote_secret', value)} /></Field>
-          <Field label="远端操作并发数" hint="默认 4，最多 10；仅限制远端入池"><NumberInput value={form.remote_operation_concurrency} min={1} max={10} onChange={(value) => set('remote_operation_concurrency', value)} /></Field>
+          <Field label="远端操作并发数" hint="默认 4，最多 50；仅限制远端入池"><NumberInput value={form.remote_operation_concurrency} min={1} max={50} onChange={(value) => set('remote_operation_concurrency', value)} /></Field>
         </div>
       </Card></div>
     </div>

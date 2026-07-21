@@ -9,7 +9,8 @@
 - SQLite 持久化，密码、SSO、OAuth 和外部服务密钥加密存储
 - `tokens.txt`、`accounts.txt`、`cpa_auths.zip` 下载
 - 手动生成 CPA/OIDC
-- 独立的 SSO 池或 CPA 管理 API 远端导入
+- 独立的 SSO、Build 和 Console 远端入池
+- 远端入池复用进程级管理员会话，Access Token 到期后优先使用 Refresh Cookie 刷新
 - 中断任务恢复为 `interrupted`，不会在重启后自动重复注册
 
 远端入池和 CPA/OIDC 是独立操作。它们失败时不会改变已经成功的注册状态。
@@ -52,7 +53,8 @@ chmod +x start.sh turnstile-solver/start.sh
 注册和远端服务参数在登录后的“系统设置”中维护。敏感字段不会回传浏览器；已经配置的密钥留空保存时会保留原值。
 
 - 本地 Solver URL：Windows 默认 `http://127.0.0.1:5072`；Compose 自动使用 `http://solver:5072`
-- 注册并发：协议上限 4；本地 Solver 模式上限 2
+- 注册并发：最多 50；使用本地 Solver 时会按 Solver 能力进一步限制
+- 远端操作并发：默认 4、最多 50，仅限制 SSO、Build 和 Console 入池，不占用本地账号操作槽位
 - 自动重试：只重试 `CreateUser` 前失败，避免可能已创建账号后重复注册
 - CPA 远端模式既接受站点 Base URL，也接受完整 `/api/admin/v1/accounts/import` 地址
 

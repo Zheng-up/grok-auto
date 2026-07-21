@@ -2,11 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider } from 'next-themes'
-import { createBrowserRouter, RouterProvider } from 'react-router-dom'
+import { createBrowserRouter, Navigate, RouterProvider } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import { AuthBoundary } from './app/auth-boundary'
 import { AppShell } from './app/app-shell'
-import { DashboardPage } from './features/dashboard'
 import { RegisterPage } from './features/register'
 import { AccountsPage } from './features/accounts'
 import { TasksPage } from './features/tasks'
@@ -15,8 +14,8 @@ import './index.css'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 3000, refetchOnWindowFocus: false } } })
 const router = createBrowserRouter([{ element: <AuthBoundary><AppShell /></AuthBoundary>, children: [
-  { index: true, element: <DashboardPage /> },
-  { path: 'register', element: <RegisterPage /> },
+  { index: true, element: <RegisterPage /> },
+  { path: 'register', element: <Navigate to="/" replace /> },
   { path: 'accounts', element: <AccountsPage /> },
   { path: 'tasks', element: <TasksPage /> },
   { path: 'settings', element: <SettingsPage /> },

@@ -41,8 +41,9 @@ export function Badge({ value }: { value: string }) {
   const success = ['success', 'completed', 'imported', 'resolved'].includes(normalized)
   const danger = ['failed', 'error'].includes(normalized)
   const running = ['running', 'queued', 'stopping', 'pausing'].includes(normalized)
-  return <span className={clsx('inline-flex whitespace-nowrap items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs', success && 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300', danger && 'border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300', running && 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300', !success && !danger && !running && 'text-[var(--muted)]')}>
-    <span className={clsx('status-dot', success ? 'bg-emerald-500' : danger ? 'bg-red-500' : running ? 'bg-amber-500' : 'bg-neutral-400')} />{statusLabel(normalized)}
+  const waiting = normalized === 'waiting'
+  return <span className={clsx('inline-flex whitespace-nowrap items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs', success && 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300', danger && 'border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300', running && 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300', waiting && 'border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-300', !success && !danger && !running && !waiting && 'text-[var(--muted)]')}>
+    <span className={clsx('status-dot', success ? 'bg-emerald-500' : danger ? 'bg-red-500' : running ? 'bg-amber-500' : waiting ? 'bg-sky-500' : 'bg-neutral-400')} />{statusLabel(normalized)}
   </span>
 }
 
