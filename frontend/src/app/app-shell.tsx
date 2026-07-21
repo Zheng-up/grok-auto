@@ -11,7 +11,6 @@ import {
   Play,
   Settings,
   Sun,
-  X,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useState } from 'react'
@@ -55,17 +54,23 @@ export function AppShell() {
     )}>
       <button
         type="button"
+        className="absolute -right-5 top-3 z-10 flex size-10 items-center justify-center rounded-full border bg-[var(--panel)] text-[var(--strong)] shadow-md transition-colors hover:bg-[var(--soft)] lg:hidden"
+        onClick={() => setOpen(false)}
+        aria-label="收起导航"
+        title="收起导航"
+      ><ChevronLeft size={20} strokeWidth={2.4} /></button>
+      <button
+        type="button"
         className="absolute -right-4 top-5 z-10 hidden size-8 items-center justify-center rounded-full border bg-[var(--panel)] text-[var(--strong)] shadow-md transition-colors hover:bg-[var(--soft)] lg:flex"
         onClick={toggleCollapsed}
         aria-label={collapsed ? '展开导航' : '折叠导航'}
         title={collapsed ? '展开导航' : '折叠导航'}
       >{collapsed ? <ChevronRight size={19} strokeWidth={2.4} /> : <ChevronLeft size={19} strokeWidth={2.4} />}</button>
-      <div className={clsx('flex h-16 items-center justify-between overflow-hidden border-b px-3', collapsed && 'lg:justify-center lg:px-2')}>
+      <div className={clsx('flex h-16 items-center overflow-hidden border-b px-3', collapsed && 'lg:justify-center lg:px-2')}>
         <Link to="/" className={clsx('flex min-w-0 items-center gap-2.5 font-semibold transition-[gap] duration-200', collapsed && 'lg:gap-0')} title="Grok 注册台">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-neutral-900 text-white dark:bg-white dark:text-black"><Activity size={17} /></span>
           <span className={clsx('overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-200', collapsed ? 'lg:max-w-0 lg:-translate-x-1 lg:opacity-0' : 'lg:max-w-40 lg:translate-x-0 lg:opacity-100')}>Grok 注册台</span>
         </Link>
-        <Button className="size-8 px-0 lg:hidden" variant="ghost" onClick={() => setOpen(false)} aria-label="关闭导航"><X size={18} /></Button>
       </div>
       <nav className="flex-1 space-y-1 overflow-hidden p-3">{nav.map(({ to, label, icon: Icon }) => <NavLink
         key={to}
@@ -96,7 +101,7 @@ export function AppShell() {
     </aside>
     <div className={clsx('transition-[padding] duration-200 ease-in-out', collapsed ? 'lg:pl-20' : 'lg:pl-64')}>
       <header className="sticky top-0 z-20 flex h-16 items-center border-b bg-[color-mix(in_srgb,var(--bg)_88%,transparent)] px-4 backdrop-blur lg:hidden">
-        <Button variant="ghost" onClick={() => setOpen(true)} aria-label="打开导航"><Menu size={19} /></Button>
+        <Button className="size-10 shrink-0 px-0" variant="ghost" onClick={() => setOpen(true)} aria-label="展开导航"><Menu size={20} /></Button>
         <span className="ml-2 font-medium">Grok 注册台</span>
       </header>
       <main className={clsx(

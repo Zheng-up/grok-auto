@@ -352,8 +352,8 @@ export function AccountsPage() {
 
     <Card>
       <div className="grid gap-3 border-b p-4 xl:grid-cols-[minmax(260px,1fr)_auto] xl:items-center">
-        <div className="flex w-full items-center gap-2">
-          <div className="relative w-full max-w-md">
+        <div className="flex w-full min-w-0 items-center gap-2">
+          <div className="relative min-w-0 flex-1">
             <Search className="muted pointer-events-none absolute left-3 top-1/2 -translate-y-1/2" size={16} />
             <Input className="search-field h-10" placeholder="搜索邮箱" value={query} onChange={(event) => {
               setQuery(event.target.value)
@@ -361,8 +361,8 @@ export function AccountsPage() {
               setSelected(new Set())
             }} />
           </div>
-          <div className="relative" ref={filterRef}>
-            <Button variant="secondary" className="h-10" onClick={() => setFilterOpen((open) => !open)}>
+          <div className="relative shrink-0" ref={filterRef}>
+            <Button variant="secondary" className="h-10 shrink-0 whitespace-nowrap px-3" onClick={() => setFilterOpen((open) => !open)}>
               <ListFilter size={15} />筛选{activeFilterCount > 0 ? ` ${activeFilterCount}` : ''}
             </Button>
             {filterOpen && <AccountFilterPanel
