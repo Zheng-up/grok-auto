@@ -25,7 +25,8 @@ class OperationManager:
         self._pause: dict[str, threading.Event] = {}
         self._lock = threading.RLock()
         self._slots = threading.Condition()
-        self._active_items = 0
+        self._active_items = 0  # operation queue slots
+        self._auths_active_items = 0  # auths queue slots
 
     def register(
         self,
@@ -40,12 +41,20 @@ class OperationManager:
     def _is_remote_kind(self, kind: str) -> bool:
         return kind in self._before_handlers or kind.startswith("remote_")
 
+    def _is_auths_kind(self, kind: str) -> bool:
+        return kind == "oidc"
+
+    def _queue_name(self, kind: str) -> str:
+        return "auths" if self._is_auths_kind(kind) else "operation"
+
     def _concurrency_for(self, kind: str, total: int) -> int:
-        if self._is_remote_kind(kind):
-            raw = int(self.settings.get("remote_operation_concurrency", 4) or 4)
-        else:
-            raw = int(self.settings.get("registration_concurrency", 2) or 2)
+        # Same configured limit for operation/auths queues; independent slot counters.
+        raw = int(self.settings.get("operation_concurrency", self.settings.get("registration_concurrency", 2)) or 2)
         return max(1, min(raw, 50, max(1, total)))
+
+    def _retry_limit_for(self, kind: str) -> int:
+        raw = int(self.settings.get("operation_retry_limit", self.settings.get("registration_retry_limit", 1)) or 0)
+        return max(0, min(raw, 5))
 
     def start(self, kind: str, account_ids: list[str]) -> dict[str, Any]:
         if kind not in self._handlers:
@@ -55,7 +64,7 @@ class OperationManager:
             raise ValueError("select at least one account")
         operation_id = f"op_{uuid.uuid4().hex[:16]}"
         concurrency = self._concurrency_for(kind, len(unique_ids))
-        retry_limit = max(0, min(int(self.settings.get("registration_retry_limit", 1) or 0), 5))
+        retry_limit = self._retry_limit_for(kind)
         with self._lock, self.db.transaction() as conn:
             placeholders = ",".join("?" for _ in unique_ids)
             existing = {
@@ -78,7 +87,7 @@ class OperationManager:
                 SELECT job.id,COUNT(DISTINCT item.account_id) matched
                 FROM operation_items item
                 JOIN operation_jobs job ON job.id=item.operation_id
-                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','waiting','stopping','pausing','paused')
+                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','waiting','stopping','pausing')
                   AND job.total=? AND item.account_id IN ({placeholders})
                 GROUP BY job.id
                 HAVING matched=?
@@ -94,7 +103,7 @@ class OperationManager:
                 f"""
                 SELECT 1 FROM operation_items item
                 JOIN operation_jobs job ON job.id=item.operation_id
-                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','waiting','stopping','pausing','paused')
+                WHERE job.kind IN ({kind_placeholders}) AND job.status IN ('queued','running','waiting','stopping','pausing')
                   AND item.account_id IN ({placeholders})
                 LIMIT 1
                 """,
@@ -129,29 +138,28 @@ class OperationManager:
         return self.get(operation_id) or {"id": operation_id}
 
     def stop(self, operation_id: str) -> bool:
-        operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
-        if not operation or operation["status"] not in {"queued", "running", "waiting", "stopping", "pausing", "paused"}:
-            return False
-        if operation["status"] == "paused":
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "UPDATE operation_items SET status='cancelled',message='任务已取消' WHERE operation_id=? AND status='queued'",
-                    (operation_id,),
-                )
-                conn.execute(
-                    "UPDATE operation_jobs SET cancel_requested=1,pause_requested=0,status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (operation_id,),
-                )
-            with self._lock:
+        with self._lock:
+            operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
+            if not operation or operation["status"] not in {"queued", "running", "waiting", "stopping", "pausing", "paused"}:
+                return False
+            if operation["status"] == "paused":
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "UPDATE operation_items SET status='cancelled',message='任务已取消' WHERE operation_id=? AND status='queued'",
+                        (operation_id,),
+                    )
+                    conn.execute(
+                        "UPDATE operation_jobs SET cancel_requested=1,pause_requested=0,status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (operation_id,),
+                    )
                 self._cancel.pop(operation_id, None)
                 self._pause.pop(operation_id, None)
-            self.events.publish(operation_id, "[!] 账号操作已取消", "warning")
-            return True
-        self.db.execute(
-            "UPDATE operation_jobs SET cancel_requested=1,pause_requested=0,status='stopping',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (operation_id,),
-        )
-        with self._lock:
+                self.events.publish(operation_id, "[!] 账号操作已取消", "warning")
+                return True
+            self.db.execute(
+                "UPDATE operation_jobs SET cancel_requested=1,pause_requested=0,status='stopping',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (operation_id,),
+            )
             cancel = self._cancel.get(operation_id)
             pause = self._pause.get(operation_id)
         if pause:
@@ -164,45 +172,46 @@ class OperationManager:
         return True
 
     def pause(self, operation_id: str) -> bool:
-        operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
-        if not operation or operation["status"] not in {"queued", "running"}:
-            return False
-        self.db.execute(
-            "UPDATE operation_jobs SET pause_requested=1,status='pausing',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (operation_id,),
-        )
         with self._lock:
+            operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
+            if not operation or operation["status"] not in {"queued", "running"}:
+                return False
+            self.db.execute(
+                "UPDATE operation_jobs SET pause_requested=1,status='pausing',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (operation_id,),
+            )
             pause = self._pause.get(operation_id)
-        if pause:
-            pause.set()
+            if pause:
+                pause.set()
         with self._slots:
             self._slots.notify_all()
         self.events.publish(operation_id, "[!] 正在暂停账号操作", "warning")
         return True
 
     def resume(self, operation_id: str) -> bool:
-        operation = self.db.fetch_one("SELECT kind,status FROM operation_jobs WHERE id=?", (operation_id,))
-        if not operation or operation["status"] != "paused":
-            return False
-        rows = self.db.fetch_all(
-            "SELECT account_id FROM operation_items WHERE operation_id=? AND status='queued' ORDER BY id",
-            (operation_id,),
-        )
-        account_ids = [str(row["account_id"]) for row in rows]
-        if not account_ids:
-            return False
-        concurrency = self._concurrency_for(str(operation["kind"]), len(account_ids))
-        retry_limit = max(0, min(int(self.settings.get("registration_retry_limit", 1) or 0), 5))
         with self._lock:
-            cancel = self._cancel.setdefault(operation_id, threading.Event())
-            pause = self._pause.setdefault(operation_id, threading.Event())
-            cancel.clear()
-            pause.clear()
-        self.db.execute(
-            "UPDATE operation_jobs SET cancel_requested=0,pause_requested=0,status='queued',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (operation_id,),
-        )
-        operation_kind = str(operation["kind"])
+            operation = self.db.fetch_one("SELECT kind,status FROM operation_jobs WHERE id=?", (operation_id,))
+            if not operation or operation["status"] != "paused":
+                return False
+            rows = self.db.fetch_all(
+                "SELECT account_id FROM operation_items WHERE operation_id=? AND status='queued' ORDER BY id",
+                (operation_id,),
+            )
+            account_ids = [str(row["account_id"]) for row in rows]
+            if not account_ids:
+                return False
+            operation_kind = str(operation["kind"])
+            concurrency = self._concurrency_for(operation_kind, len(account_ids))
+            retry_limit = self._retry_limit_for(operation_kind)
+            # Do not reuse controls from the completed paused run.
+            cancel = threading.Event()
+            pause = threading.Event()
+            self._cancel[operation_id] = cancel
+            self._pause[operation_id] = pause
+            self.db.execute(
+                "UPDATE operation_jobs SET cancel_requested=0,pause_requested=0,status='queued',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (operation_id,),
+            )
         scheduler = self._remote_pool if operation_kind in self._before_handlers else self._pool
         scheduler.submit(
             self._run,
@@ -258,20 +267,84 @@ class OperationManager:
         if changed and not waiting:
             self.events.publish(operation_id, "[*] 远端限流等待结束，任务继续执行")
 
-    def _acquire_slot(self, limit: int, cancel: threading.Event, pause: threading.Event) -> bool:
+    def _older_queued_demand(self, operation_id: str, kind: str) -> int:
+        """Queued items of older *worker-active* tasks in the same queue.
+
+        Only operations that currently have a live worker can reserve free slots.
+        Stranded waiting tasks without workers must not block younger ones forever.
+        """
+        op = self.db.fetch_one(
+            "SELECT created_at, kind FROM operation_jobs WHERE id=?",
+            (operation_id,),
+        )
+        if not op:
+            return 0
+        live_ids = [oid for oid in self._cancel.keys() if oid != operation_id]
+        if not live_ids:
+            return 0
+        older_live: list[str] = []
+        for oid in live_ids:
+            other = self.db.fetch_one(
+                "SELECT id,created_at,status,kind FROM operation_jobs WHERE id=?",
+                (oid,),
+            )
+            if not other:
+                continue
+            if other["status"] in {"paused", "completed", "partial", "failed", "cancelled", "interrupted", "resolved", "retried"}:
+                continue
+            same_queue = self._is_auths_kind(str(other["kind"])) == self._is_auths_kind(kind)
+            if not same_queue:
+                continue
+            if (
+                other["created_at"] < op["created_at"]
+                or (other["created_at"] == op["created_at"] and other["id"] < operation_id)
+            ):
+                older_live.append(oid)
+        if not older_live:
+            return 0
+        placeholders = ",".join("?" for _ in older_live)
+        row = self.db.fetch_one(
+            f"""
+            SELECT COUNT(*) total
+            FROM operation_items
+            WHERE status='queued' AND operation_id IN ({placeholders})
+            """,
+            tuple(older_live),
+        ) or {}
+        return int(row.get("total") or 0)
+
+    def _acquire_slot(
+        self,
+        limit: int,
+        cancel: threading.Event,
+        pause: threading.Event,
+        queue: str = "operation",
+        operation_id: str | None = None,
+        kind: str | None = None,
+    ) -> bool:
+        attr = "_auths_active_items" if queue == "auths" else "_active_items"
         with self._slots:
-            while self._active_items >= limit:
+            while True:
                 if cancel.is_set() or pause.is_set():
                     return False
+                used = getattr(self, attr)
+                free = limit - used
+                if free <= 0:
+                    self._slots.wait(timeout=0.2)
+                    continue
+                older_queued = 0
+                if operation_id and kind:
+                    older_queued = self._older_queued_demand(operation_id, kind)
+                # Free slots go to older tasks first; only leftovers open newer tasks.
+                if free > older_queued:
+                    setattr(self, attr, used + 1)
+                    return True
                 self._slots.wait(timeout=0.2)
-            if cancel.is_set() or pause.is_set():
-                return False
-            self._active_items += 1
-            return True
 
-    def _release_slot(self) -> None:
+    def _release_slot(self, queue: str = "operation") -> None:
+        attr = "_auths_active_items" if queue == "auths" else "_active_items"
         with self._slots:
-            self._active_items -= 1
+            setattr(self, attr, max(0, getattr(self, attr) - 1))
             self._slots.notify_all()
 
     def _run_item(
@@ -284,27 +357,38 @@ class OperationManager:
         pause: threading.Event,
         concurrency: int,
         retry_limit: int,
+        kind: str = "operation",
     ) -> tuple[str, str]:
         attempt = 0
         while True:
-            if cancel.is_set():
-                return "cancelled", "任务已取消"
+            if not self._sync_controls(operation_id, cancel, pause):
+                return ("cancelled", "任务已取消") if cancel.is_set() else ("queued", "等待继续")
             if pause.is_set():
                 return "queued", "等待继续"
             if before:
                 before(operation_id)
-                if cancel.is_set():
-                    return "cancelled", "任务已取消"
-                if pause.is_set():
-                    return "queued", "等待继续"
-            uses_local_slot = before is None
-            if uses_local_slot and not self._acquire_slot(concurrency, cancel, pause):
+                if not self._sync_controls(operation_id, cancel, pause):
+                    return ("cancelled", "任务已取消") if cancel.is_set() else ("queued", "等待继续")
+            queue = self._queue_name(kind)
+            if not self._acquire_slot(
+                concurrency,
+                cancel,
+                pause,
+                queue=queue,
+                operation_id=operation_id,
+                kind=kind,
+            ):
                 return ("cancelled", "任务开始前已取消") if cancel.is_set() else ("queued", "等待继续")
             try:
-                self.db.execute(
-                    "UPDATE operation_items SET status='running' WHERE operation_id=? AND account_id=?",
-                    (operation_id, account_id),
-                )
+                # Serialize the final start check with pause()/stop(): a submitted
+                # future cannot turn into a new running item after pause is durable.
+                with self._lock:
+                    if not self._sync_controls(operation_id, cancel, pause):
+                        return ("cancelled", "任务开始前已取消") if cancel.is_set() else ("queued", "等待继续")
+                    self.db.execute(
+                        "UPDATE operation_items SET status='running' WHERE operation_id=? AND account_id=?",
+                        (operation_id, account_id),
+                    )
                 handler(account_id, operation_id)
                 return "success", "操作完成"
             except Exception as exc:
@@ -320,8 +404,7 @@ class OperationManager:
                     "warning",
                 )
             finally:
-                if uses_local_slot:
-                    self._release_slot()
+                self._release_slot(queue=self._queue_name(kind))
 
     def _run(
         self,
@@ -333,9 +416,10 @@ class OperationManager:
         concurrency: int,
         retry_limit: int,
     ) -> None:
+        self._sync_controls(operation_id, cancel, pause)
         self.db.execute(
             "UPDATE operation_jobs SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            ("pausing" if pause.is_set() else "running", operation_id),
+            ("stopping" if cancel.is_set() else "pausing" if pause.is_set() else "running", operation_id),
         )
         self.events.publish(
             operation_id,
@@ -353,25 +437,33 @@ class OperationManager:
         success = int(existing.get("success") or 0)
         failed = int(existing.get("failed") or 0)
         while inflight or not exhausted:
-            while not cancel.is_set() and not pause.is_set() and not exhausted and len(inflight) < concurrency:
-                try:
-                    account_id = next(pending_ids)
-                except StopIteration:
-                    exhausted = True
+            while not exhausted and len(inflight) < concurrency:
+                # Use the same lock as pause()/stop(), and consult the persisted
+                # request, to prevent both Event-loss and dispatch races.
+                with self._lock:
+                    if not self._sync_controls(operation_id, cancel, pause):
+                        break
+                    try:
+                        account_id = next(pending_ids)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    item_pool = self._remote_items if before else self._items
+                    future = item_pool.submit(
+                        self._run_item,
+                        operation_id,
+                        account_id,
+                        handler,
+                        before,
+                        cancel,
+                        pause,
+                        concurrency,
+                        retry_limit,
+                        kind,
+                    )
+                    inflight[future] = account_id
+                if cancel.is_set() or pause.is_set():
                     break
-                item_pool = self._remote_items if before else self._items
-                future = item_pool.submit(
-                    self._run_item,
-                    operation_id,
-                    account_id,
-                    handler,
-                    before,
-                    cancel,
-                    pause,
-                    concurrency,
-                    retry_limit,
-                )
-                inflight[future] = account_id
             if not inflight:
                 break
             done, _ = wait(inflight, return_when=FIRST_COMPLETED)
@@ -402,33 +494,53 @@ class OperationManager:
                     "UPDATE operation_jobs SET completed=?,success=?,failed=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (success + failed, success, failed, operation_id),
                 )
-        remaining = self.db.fetch_one(
-            "SELECT COUNT(*) total FROM operation_items WHERE operation_id=? AND status='queued'",
-            (operation_id,),
-        ) or {}
-        has_remaining = int(remaining.get("total") or 0) > 0
-        if cancel.is_set():
-            self.db.execute(
-                "UPDATE operation_items SET status='cancelled',message='任务开始前已取消' WHERE operation_id=? AND status='queued'",
+        with self._lock:
+            remaining = self.db.fetch_one(
+                "SELECT COUNT(*) total FROM operation_items WHERE operation_id=? AND status='queued'",
                 (operation_id,),
+            ) or {}
+            has_remaining = int(remaining.get("total") or 0) > 0
+            self._sync_controls(operation_id, cancel, pause)
+            if cancel.is_set():
+                self.db.execute(
+                    "UPDATE operation_items SET status='cancelled',message='任务开始前已取消' WHERE operation_id=? AND status='queued'",
+                    (operation_id,),
+                )
+                final = "cancelled"
+            elif pause.is_set() and has_remaining:
+                final = "paused"
+            else:
+                final = "completed" if failed == 0 else ("failed" if success == 0 else "partial")
+            self.db.execute(
+                "UPDATE operation_jobs SET status=?,pause_requested=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (final, int(final == "paused"), operation_id),
             )
-            final = "cancelled"
-        elif pause.is_set() and has_remaining:
-            final = "paused"
-        else:
-            final = "completed" if failed == 0 else ("failed" if success == 0 else "partial")
-        self.db.execute(
-            "UPDATE operation_jobs SET status=?,pause_requested=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (final, int(final == "paused"), operation_id),
-        )
         final_label = {"completed": "已完成", "partial": "部分成功", "failed": "失败", "cancelled": "已取消", "paused": "已暂停"}.get(final, final)
         level = "success" if final == "completed" else ("error" if final == "failed" else "warning")
         prefix = {"success": "[+]", "warning": "[!]", "error": "[-]"}[level]
         self.events.publish(operation_id, f"{prefix} 账号操作{final_label} · 成功 {success} · 失败 {failed}", level)
         if final != "paused":
             with self._lock:
-                self._cancel.pop(operation_id, None)
-                self._pause.pop(operation_id, None)
+                if self._cancel.get(operation_id) is cancel:
+                    self._cancel.pop(operation_id, None)
+                if self._pause.get(operation_id) is pause:
+                    self._pause.pop(operation_id, None)
+
+    def _sync_controls(self, operation_id: str, cancel: threading.Event, pause: threading.Event) -> bool:
+        """Make durable pause/cancel requests authoritative over in-memory Events."""
+        operation = self.db.fetch_one(
+            "SELECT cancel_requested,pause_requested FROM operation_jobs WHERE id=?",
+            (operation_id,),
+        ) or {}
+        if operation.get("cancel_requested"):
+            cancel.set()
+            pause.clear()
+            return False
+        if operation.get("pause_requested"):
+            pause.set()
+            return False
+        pause.clear()
+        return not cancel.is_set()
 
     def _resolve_prior_failures(
         self,
@@ -586,15 +698,53 @@ class OperationManager:
         self._items.shutdown(wait=False, cancel_futures=True)
         self._remote_items.shutdown(wait=False, cancel_futures=True)
 
-    def list(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def list(self, limit: int = 100, offset: int = 0, q: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+        query = (q or "").strip()
+        if query:
+            like = f"%{query}%"
+            return self.db.fetch_all(
+                "SELECT * FROM operation_jobs WHERE id LIKE ? OR kind LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (like, like, limit, offset),
+            )
         return self.db.fetch_all(
             "SELECT * FROM operation_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (max(1, min(limit, 500)), max(0, offset)),
+            (limit, offset),
         )
 
-    def count(self) -> int:
-        row = self.db.fetch_one("SELECT COUNT(*) total FROM operation_jobs")
+    def count(self, q: str | None = None) -> int:
+        query = (q or "").strip()
+        if query:
+            like = f"%{query}%"
+            row = self.db.fetch_one(
+                "SELECT COUNT(*) total FROM operation_jobs WHERE id LIKE ? OR kind LIKE ?",
+                (like, like),
+            )
+        else:
+            row = self.db.fetch_one("SELECT COUNT(*) total FROM operation_jobs")
         return int((row or {}).get("total") or 0)
+
+    def clear_finished(self) -> dict[str, int]:
+        terminal = ("completed", "partial", "failed", "cancelled", "interrupted", "resolved", "retried")
+        placeholders = ",".join("?" for _ in terminal)
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM operation_jobs WHERE status IN ({placeholders})",
+                terminal,
+            ).fetchall()
+            ids = [str(row[0]) for row in rows]
+            if not ids:
+                return {"operations": 0, "logs": 0}
+            id_ph = ",".join("?" for _ in ids)
+            logs = int(conn.execute(
+                f"SELECT COUNT(*) FROM job_logs WHERE stream_id IN ({id_ph})",
+                ids,
+            ).fetchone()[0])
+            conn.execute(f"DELETE FROM job_logs WHERE stream_id IN ({id_ph})", ids)
+            conn.execute(f"DELETE FROM operation_items WHERE operation_id IN ({id_ph})", ids)
+            conn.execute(f"DELETE FROM operation_jobs WHERE id IN ({id_ph})", ids)
+        return {"operations": len(ids), "logs": logs}
 
     def get(self, operation_id: str) -> dict[str, Any] | None:
         operation = self.db.fetch_one("SELECT * FROM operation_jobs WHERE id=?", (operation_id,))

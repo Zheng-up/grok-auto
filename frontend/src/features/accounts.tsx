@@ -4,7 +4,7 @@ import { ChevronRight, CloudUpload, Download, KeyRound, ListFilter, RefreshCw, S
 import { toast } from 'sonner'
 import { api, download } from '../lib/api'
 import type { Account, Dashboard, Operation } from '../lib/types'
-import { authStatusLabel, operationLabel, remoteStatusLabel } from '../lib/labels'
+import { authStatusLabel, operationLabel, remoteStatusLabel, formatDbTime } from '../lib/labels'
 import { Badge, Button, Card, Empty, Input, PageHeader, PaginationBar, Spinner } from '../components/ui'
 
 type RemoteKind = 'remote_web' | 'remote_cpa' | 'remote_console'
@@ -211,6 +211,68 @@ function RemoteImportDialog({
   </div>
 }
 
+function AuthsDialog({
+  accounts,
+  pending,
+  onClose,
+  onSubmit,
+}: {
+  accounts: Account[]
+  pending: boolean
+  onClose: () => void
+  onSubmit: (accountIds: string[]) => void
+}) {
+  const [range, setRange] = useState<ImportRange>('missing')
+  const ready = accounts.filter((account) => account.oidc_status === 'success').length
+  const missing = accounts.length - ready
+  const running = accounts.filter((account) => account.oidc_status === 'running' || account.active_operations?.includes('oidc')).length
+  const candidates = accounts.filter((account) => {
+    if (account.oidc_status === 'running' || account.active_operations?.includes('oidc')) return false
+    return range === 'all' || account.oidc_status !== 'success'
+  })
+
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-[2px]" onMouseDown={(event) => {
+    if (event.target === event.currentTarget && !pending) onClose()
+  }}>
+    <section role="dialog" aria-modal="true" aria-labelledby="auths-generate-title" className="surface w-full max-w-lg p-5 shadow-2xl">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 id="auths-generate-title" className="text-lg font-semibold">生成 auths</h2>
+          <p className="muted mt-1 text-sm">已选择 {accounts.length} 个账号</p>
+        </div>
+        <button type="button" className="rounded-md p-1.5 hover:bg-[var(--soft)]" onClick={onClose} disabled={pending} aria-label="关闭"><X size={17} /></button>
+      </div>
+
+      <div className="mt-5 grid grid-cols-3 gap-2 text-center">
+        <div className="rounded-lg border p-3"><div className="text-xl font-semibold">{ready}</div><div className="muted mt-1 text-xs">已生成</div></div>
+        <div className="rounded-lg border p-3"><div className="text-xl font-semibold">{missing}</div><div className="muted mt-1 text-xs">未生成/失败</div></div>
+        <div className="rounded-lg border p-3"><div className="text-xl font-semibold">{running}</div><div className="muted mt-1 text-xs">执行中</div></div>
+      </div>
+
+      <div className="mt-5">
+        <div className="mb-2 text-sm font-medium">生成范围</div>
+        <div className="grid grid-cols-2 rounded-xl bg-[var(--soft)] p-1">
+          <button type="button" className={`rounded-lg px-3 py-2 text-sm transition ${range === 'missing' ? 'bg-[var(--panel)] font-medium shadow-sm' : 'muted hover:text-[var(--strong)]'}`} onClick={() => setRange('missing')}>仅生成缺失</button>
+          <button type="button" className={`rounded-lg px-3 py-2 text-sm transition ${range === 'all' ? 'bg-[var(--panel)] font-medium shadow-sm' : 'muted hover:text-[var(--strong)]'}`} onClick={() => setRange('all')}>全部重新生成</button>
+        </div>
+        <p className="muted mt-2 text-xs">
+          {range === 'missing'
+            ? '仅提交尚未成功生成 auths 的账号（包含未生成与失败）。'
+            : '重新提交全部可用账号，已成功生成的账号也会重新生成。'}
+          {running > 0 ? ` 当前有 ${running} 个账号正在执行，将自动跳过。` : ''}
+        </p>
+      </div>
+
+      <div className="mt-6 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={pending}>取消</Button>
+        <Button onClick={() => onSubmit(candidates.map((account) => account.id))} disabled={pending || candidates.length === 0}>
+          {pending ? '正在创建…' : `开始生成（${candidates.length}）`}
+        </Button>
+      </div>
+    </section>
+  </div>
+}
+
 function ExportDialog({ selectedCount, pending, onClose, onSubmit }: { selectedCount: number; pending: boolean; onClose: () => void; onSubmit: (kind: 'tokens' | 'cpa') => void }) {
   const [kind, setKind] = useState<'tokens' | 'cpa'>('tokens')
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-[2px]" onMouseDown={(event) => {
@@ -237,6 +299,7 @@ export function AccountsPage() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState<number>(20)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [authsDialogOpen, setAuthsDialogOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [exportPending, setExportPending] = useState(false)
   const filterRef = useRef<HTMLDivElement>(null)
@@ -279,9 +342,10 @@ export function AccountsPage() {
     }),
     onSuccess: (value) => {
       const label = operationLabel(value.kind)
-      if (value.reused) toast.info(`${label}正在执行，无需重复提交`)
+      if (value.reused) toast.info(`${label}任务已在执行中，无需重复提交`)
       else toast.success(`${label}任务已创建`)
       setDialogOpen(false)
+      setAuthsDialogOpen(false)
       void client.invalidateQueries({ queryKey: ['accounts'] })
       void client.invalidateQueries({ queryKey: ['accounts-count'] })
       void client.invalidateQueries({ queryKey: ['operations'] })
@@ -381,8 +445,8 @@ export function AccountsPage() {
         <div className="flex min-h-10 flex-wrap items-center gap-2 xl:justify-end">
           <span className="muted mr-1 text-xs">已选 {ids.length}</span>
           <Button variant="secondary" onClick={() => accounts.refetch()}><RefreshCw size={15} />刷新</Button>
-          <Button variant="secondary" disabled={!ids.length || operation.isPending || authsRunning} onClick={() => operation.mutate({ kind: 'oidc', accountIds: ids })}>
-            <KeyRound size={15} />{authsRunning ? '正在生成 auths' : '生成 auths'}
+          <Button variant="secondary" disabled={!ids.length || operation.isPending} onClick={() => setAuthsDialogOpen(true)}>
+            <KeyRound size={15} />生成 auths
           </Button>
           <Button variant="secondary" disabled={!ids.length || operation.isPending} onClick={() => setDialogOpen(true)}>
             <CloudUpload size={15} />远端入池
@@ -408,7 +472,7 @@ export function AccountsPage() {
             <td className="px-3 py-3"><Badge value={row.register_status} /></td>
             <td className="px-3 py-3"><AuthStatus value={row.oidc_status} /></td>
             <td className="px-3 py-3"><RemoteStatuses account={row} /></td>
-            <td className="muted px-3 py-3 text-xs">{new Date(`${row.created_at}Z`).toLocaleString()}</td>
+            <td className="muted px-3 py-3 text-xs">{formatDbTime(row.created_at, true)}</td>
           </tr>)}</tbody>
         </table>
       </div> : <Empty text="还没有账号，请先创建注册批次" />}
@@ -433,6 +497,22 @@ export function AccountsPage() {
       onClose={() => setExportOpen(false)}
       onSubmit={(kind) => void runDownload(kind)}
     />}
+    {authsDialogOpen && (
+      <AuthsDialog
+        accounts={selectedRows}
+        pending={operation.isPending}
+        onClose={() => setAuthsDialogOpen(false)}
+        onSubmit={(accountIds) => {
+          if (!accountIds.length) {
+            toast.error('没有可生成的账号')
+            return
+          }
+          operation.mutate({ kind: 'oidc', accountIds }, {
+            onSuccess: () => setAuthsDialogOpen(false),
+          })
+        }}
+      />
+    )}
     {dialogOpen && <RemoteImportDialog
       accounts={selectedRows}
       pending={operation.isPending}

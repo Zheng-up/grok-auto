@@ -75,6 +75,13 @@ class TurnstileAPIServer:
         self.thread_count = max(1, min(hard_cap, int(thread or 1)))
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
+        # Prefetch: keep a small pool of one-shot fresh tokens ready.
+        # key = f"{url}||{sitekey}" -> list[{token, created_at, action, cdata}]
+        self._prefetch_tokens: dict = {}
+        self._prefetch_targets: dict = {}  # key -> {depth, url, sitekey, action, cdata}
+        self._prefetch_task = None
+        self._prefetch_lock = None
+        self._prefetch_ttl = float(os.getenv("TURNSTILE_PREFETCH_TTL", "75") or 75)
         self.use_random_config = use_random_config
         self.browser_name = browser_name
         self.browser_version = browser_version
@@ -169,6 +176,8 @@ class TurnstileAPIServer:
         # Memory/ops helpers
         self.app.route('/health', methods=['GET'])(self.health)
         self.app.route('/reclaim', methods=['POST', 'GET'])(self.reclaim)
+        self.app.route('/warm', methods=['POST', 'GET'])(self.warm)
+        self.app.route('/prefetch', methods=['POST'])(self.prefetch)
         self.app.route('/')(self.index)
         
 
@@ -180,6 +189,8 @@ class TurnstileAPIServer:
             await init_db()
             # Periodic result cleanup (independent of browsers)
             asyncio.create_task(self._periodic_cleanup())
+            self._prefetch_lock = asyncio.Lock()
+            self._prefetch_task = asyncio.create_task(self._prefetch_loop())
 
             if self.lazy_browsers:
                 logger.info(
@@ -1345,6 +1356,196 @@ class TurnstileAPIServer:
             }
         return None
 
+
+    def _prefetch_key(self, url: str, sitekey: str) -> str:
+        return f"{(url or '').strip()}||{(sitekey or '').strip()}"
+
+    def _purge_expired_tokens(self, key: str | None = None) -> None:
+        ttl = max(20.0, min(110.0, float(self._prefetch_ttl or 75)))
+        now = time.time()
+        keys = [key] if key else list(self._prefetch_tokens.keys())
+        for k in keys:
+            items = self._prefetch_tokens.get(k) or []
+            kept = [it for it in items if (now - float(it.get("created_at") or 0)) < ttl and it.get("token")]
+            if kept:
+                self._prefetch_tokens[k] = kept
+            else:
+                self._prefetch_tokens.pop(k, None)
+
+    def _pop_prefetched_token(self, url: str, sitekey: str) -> str | None:
+        key = self._prefetch_key(url, sitekey)
+        self._purge_expired_tokens(key)
+        items = self._prefetch_tokens.get(key) or []
+        if not items:
+            return None
+        item = items.pop(0)
+        if not items:
+            self._prefetch_tokens.pop(key, None)
+        else:
+            self._prefetch_tokens[key] = items
+        token = str(item.get("token") or "").strip()
+        return token or None
+
+    async def _solve_token_once(self, url: str, sitekey: str, action=None, cdata=None) -> str | None:
+        """Solve one token via the normal path and return the string, or None."""
+        task_id = str(uuid.uuid4())
+        await save_result(task_id, "turnstile", {
+            "status": "CAPTCHA_NOT_READY",
+            "createTime": int(time.time()),
+            "url": url,
+            "sitekey": sitekey,
+            "action": action,
+            "cdata": cdata,
+            "prefetch": True,
+        })
+        try:
+            await self._solve_turnstile(
+                task_id=task_id,
+                url=url,
+                sitekey=sitekey,
+                action=action,
+                cdata=cdata,
+            )
+        except Exception as e:
+            logger.warning(f"prefetch solve failed: {e}")
+            return None
+        result = await load_result(task_id)
+        if isinstance(result, dict):
+            token = str(result.get("value") or "").strip()
+            if token and token not in {"CAPTCHA_FAIL", "CAPTCHA_NOT_READY"}:
+                return token
+        return None
+
+    async def _prefetch_loop(self) -> None:
+        """Background producer: keep up to target depth fresh one-shot tokens."""
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                if self._prefetch_lock is None:
+                    self._prefetch_lock = asyncio.Lock()
+                # snapshot targets
+                targets = dict(self._prefetch_targets or {})
+                if not targets:
+                    continue
+                for key, meta in list(targets.items()):
+                    try:
+                        depth = max(0, min(20, int(meta.get("depth") or 0)))
+                        if depth <= 0:
+                            continue
+                        url = str(meta.get("url") or "")
+                        sitekey = str(meta.get("sitekey") or "")
+                        if not url or not sitekey:
+                            continue
+                        self._purge_expired_tokens(key)
+                        have = len(self._prefetch_tokens.get(key) or [])
+                        need = depth - have
+                        if need <= 0:
+                            continue
+                        # produce one per loop tick per key to avoid monopolizing the single browser
+                        token = await self._solve_token_once(
+                            url,
+                            sitekey,
+                            action=meta.get("action"),
+                            cdata=meta.get("cdata"),
+                        )
+                        if not token:
+                            continue
+                        async with self._prefetch_lock:
+                            self._purge_expired_tokens(key)
+                            bucket = self._prefetch_tokens.setdefault(key, [])
+                            if len(bucket) < depth:
+                                bucket.append({
+                                    "token": token,
+                                    "created_at": time.time(),
+                                    "action": meta.get("action"),
+                                    "cdata": meta.get("cdata"),
+                                })
+                                logger.info(
+                                    f"Prefetch token ready depth={len(bucket)}/{depth} "
+                                    f"sitekey={sitekey[:12]}..."
+                                )
+                    except Exception as e:
+                        if self.debug:
+                            logger.debug(f"prefetch target error: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"prefetch loop error: {e}")
+                await asyncio.sleep(2.0)
+
+    async def warm(self):
+        """Warm browser pool without solving a captcha."""
+        try:
+            await self._ensure_pool()
+            return jsonify({
+                "ok": True,
+                "warmed": True,
+                "pool_ready": bool(self._pool_ready),
+                "queue": self.browser_pool.qsize(),
+                "owned": len(self._owned_browsers or []),
+                "thread": self.thread_count,
+            }), 200
+        except Exception as e:
+            logger.error(f"warm failed: {e}")
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    async def prefetch(self):
+        """Configure background one-shot token prefetch for a sitekey/url.
+
+        Body:
+          websiteURL, websiteKey, depth (default 1), action?, cdata?
+        Tokens are single-use and expire after TURNSTILE_PREFETCH_TTL seconds.
+        """
+        try:
+            body = await request.get_json(force=True, silent=True) or {}
+        except Exception:
+            body = {}
+        url = (body.get("websiteURL") or body.get("websiteUrl") or body.get("url") or "").strip()
+        sitekey = (body.get("websiteKey") or body.get("sitekey") or body.get("siteKey") or "").strip()
+        try:
+            depth = int(body.get("depth") or 1)
+        except (TypeError, ValueError):
+            depth = 1
+        depth = max(0, min(20, depth))
+        action = body.get("action") or body.get("pageAction")
+        cdata = body.get("cdata") or body.get("data")
+        if depth > 0 and (not url or not sitekey):
+            return jsonify({
+                "ok": False,
+                "error": "websiteURL and websiteKey required when depth>0",
+            }), 400
+        # warm first so first token is faster
+        try:
+            await self._ensure_pool()
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"warm failed: {e}"}), 500
+        key = self._prefetch_key(url, sitekey) if url and sitekey else ""
+        if depth <= 0:
+            if key:
+                self._prefetch_targets.pop(key, None)
+                self._prefetch_tokens.pop(key, None)
+            else:
+                self._prefetch_targets.clear()
+                self._prefetch_tokens.clear()
+            return jsonify({"ok": True, "depth": 0, "cleared": True}), 200
+        self._prefetch_targets[key] = {
+            "depth": depth,
+            "url": url,
+            "sitekey": sitekey,
+            "action": action,
+            "cdata": cdata,
+        }
+        self._purge_expired_tokens(key)
+        ready = len(self._prefetch_tokens.get(key) or [])
+        return jsonify({
+            "ok": True,
+            "depth": depth,
+            "ready": ready,
+            "ttl_sec": float(self._prefetch_ttl or 75),
+            "pool_ready": bool(self._pool_ready),
+            "sitekey": sitekey[:16] + ("..." if len(sitekey) > 16 else ""),
+        }), 200
+
     async def _enqueue_turnstile(
         self,
         url: str,
@@ -1352,7 +1553,11 @@ class TurnstileAPIServer:
         action: Optional[str] = None,
         cdata: Optional[str] = None,
     ):
-        """创建任务并异步求解，返回 (task_id, error_response)。"""
+        """创建任务并异步求解，返回 (task_id, error_response)。
+
+        Prefer a one-shot prefetched token when available so registration workers
+        spend less time blocked on Turnstile. Prefetch refill continues in background.
+        """
         if not url or not sitekey:
             return None, {
                 "errorId": 1,
@@ -1361,6 +1566,25 @@ class TurnstileAPIServer:
             }
 
         task_id = str(uuid.uuid4())
+        # Fast path: consume one ready token (single-use).
+        token = self._pop_prefetched_token(url, sitekey)
+        if token:
+            elapsed = 0.0
+            await save_result(task_id, "turnstile", {
+                "value": token,
+                "elapsed_time": elapsed,
+                "createTime": int(time.time()),
+                "url": url,
+                "sitekey": sitekey,
+                "action": action,
+                "cdata": cdata,
+                "from_prefetch": True,
+            })
+            if self.debug:
+                logger.debug(f"Served prefetched token for task {task_id}")
+            # Keep producing in background via _prefetch_loop targets.
+            return task_id, None
+
         await save_result(task_id, "turnstile", {
             "status": "CAPTCHA_NOT_READY",
             "createTime": int(time.time()),
@@ -1536,6 +1760,13 @@ class TurnstileAPIServer:
         idle_for = None
         if self._last_used:
             idle_for = round(time.time() - self._last_used, 1)
+        for k in list(self._prefetch_tokens.keys()):
+            self._purge_expired_tokens(k)
+        prefetch_ready = sum(len(v or []) for v in (self._prefetch_tokens or {}).values())
+        prefetch_targets = {
+            (meta.get("sitekey") or "")[:12]: int(meta.get("depth") or 0)
+            for meta in (self._prefetch_targets or {}).values()
+        }
         return jsonify({
             "ok": True,
             "lazy": bool(self.lazy_browsers),
@@ -1547,6 +1778,9 @@ class TurnstileAPIServer:
             "owned": len(self._owned_browsers or []),
             "in_flight": int(self._in_flight or 0),
             "idle_for_sec": idle_for,
+            "prefetch_ready": prefetch_ready,
+            "prefetch_targets": prefetch_targets,
+            "prefetch_ttl_sec": float(self._prefetch_ttl or 75),
         }), 200
 
     async def reclaim(self):

@@ -17,6 +17,9 @@ export type Batch = {
   error?: string
   created_at: string
   updated_at: string
+  elapsed_seconds?: number
+  avg_account_seconds?: number | null
+  finished_accounts?: number
   jobs?: RegistrationJob[]
   config?: Record<string, unknown>
 }

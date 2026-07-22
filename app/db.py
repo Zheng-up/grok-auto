@@ -211,10 +211,10 @@ class Database:
                     "ALTER TABLE operation_jobs ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
                 )
             conn.execute(
-                "UPDATE registration_batches SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','waiting','stopping','pausing')"
+                "UPDATE registration_batches SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','stopping','pausing')"
             )
             conn.execute(
-                "UPDATE registration_jobs SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')"
+                "UPDATE registration_jobs SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') AND batch_id IN (SELECT id FROM registration_batches WHERE status='interrupted')"
             )
             conn.execute(
                 "UPDATE operation_jobs SET status='interrupted', error=COALESCE(error, 'service restarted'), updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running','waiting','stopping','pausing')"

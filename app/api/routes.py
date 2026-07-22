@@ -175,21 +175,28 @@ def start_registration(
     body: RegistrationStartRequest,
     _: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, Any]:
-    return services.registration.start(body.count, body.concurrency, body.overrides)
+    try:
+        return services.registration.start(body.count, body.concurrency, body.overrides)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/registration/batches")
 def list_batches(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    q: str = Query(default=""),
     _: dict[str, Any] = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    return services.registration.list_batches(limit, offset)
+    return services.registration.list_batches(limit, offset, q=q)
 
 
 @router.get("/registration/batches/count")
-def count_batches(_: dict[str, Any] = Depends(require_admin)) -> dict[str, int]:
-    return {"total": services.registration.count_batches()}
+def count_batches(
+    q: str = Query(default=""),
+    _: dict[str, Any] = Depends(require_admin),
+) -> dict[str, int]:
+    return {"total": services.registration.count_batches(q=q)}
 
 
 @router.get("/registration/batches/{batch_id}")
@@ -307,14 +314,18 @@ def delete_accounts(
 def list_operations(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    q: str = Query(default=""),
     _: dict[str, Any] = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    return services.operations.list(limit, offset)
+    return services.operations.list(limit, offset, q=q)
 
 
 @router.get("/operations/count")
-def count_operations(_: dict[str, Any] = Depends(require_admin)) -> dict[str, int]:
-    return {"total": services.operations.count()}
+def count_operations(
+    q: str = Query(default=""),
+    _: dict[str, Any] = Depends(require_admin),
+) -> dict[str, int]:
+    return {"total": services.operations.count(q=q)}
 
 
 @router.post("/operations/{operation_id}/pause")
@@ -433,6 +444,17 @@ def clear_all_logs(
 ) -> dict[str, int]:
     try:
         return services.events.clear_all()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.delete("/tasks")
+def clear_all_tasks(
+    _: dict[str, Any] = Depends(require_admin),
+) -> dict[str, int]:
+    """Clear finished registration/operation tasks only; keep active ones."""
+    try:
+        return services.events.clear_all_tasks(services.registration, services.operations)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

@@ -499,7 +499,7 @@ class RemotePoolService:
             raise ValueError("不支持的远端入池类型")
         status_field = _STATUS_FIELDS[selected_mode]
         mode_label = _MODE_LABELS[selected_mode]
-        concurrency = max(1, min(int(cfg.get("remote_operation_concurrency", 4) or 4), 50))
+        concurrency = max(1, min(int(cfg.get("operation_concurrency", cfg.get("registration_concurrency", 2)) or 2), 50))
         self.wait_for_cooldown(stream_id)
         self._acquire_remote_slot(concurrency)
         try:

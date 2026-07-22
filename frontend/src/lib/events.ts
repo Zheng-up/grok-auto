@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
 
-export type LogRow = { id: number; level: string; message: string; created_at: string }
+export type LogRow = { id: number; level: string; message: string; created_at: string; stream_id?: string }
 type LogState = { streamKey?: string; rows: LogRow[] }
 
 export function useEventLog(streamId?: string, resetKey = 0) {
@@ -10,17 +10,28 @@ export function useEventLog(streamId?: string, resetKey = 0) {
   const rows = state.streamKey === streamKey ? state.rows : []
 
   useEffect(() => {
-    if (!streamId) return
+    if (!streamId || !streamKey) return
 
     let cursor = 0
     let source: EventSource | undefined
     let pollTimer: number | undefined
     let stopped = false
+    const seen = new Set<number>()
+
+    // Reset viewer immediately when remounting / switching stream.
+    setState({ streamKey, rows: [] })
 
     const append = (incoming: LogRow[]) => {
-      const fresh = incoming.filter((row) => row.id > cursor)
+      if (!incoming.length) return
+      const fresh: LogRow[] = []
+      for (const row of incoming) {
+        const id = Number(row.id)
+        if (!Number.isFinite(id) || id <= 0 || seen.has(id) || id <= cursor) continue
+        seen.add(id)
+        fresh.push(row)
+      }
       if (!fresh.length) return
-      cursor = Math.max(cursor, ...fresh.map((row) => row.id))
+      cursor = Math.max(cursor, ...fresh.map((row) => Number(row.id)))
       setState((current) => {
         const currentRows = current.streamKey === streamKey ? current.rows : []
         return { streamKey, rows: [...currentRows, ...fresh].slice(-500) }
@@ -36,19 +47,29 @@ export function useEventLog(streamId?: string, resetKey = 0) {
       }
     }
 
-    source = new EventSource(`/api/events/${encodeURIComponent(streamId)}?after=${cursor}`)
-    source.addEventListener('log', (event) => {
+    // Bootstrap once with latest tail (backend after=0 returns latest N), then stream only newer rows.
+    void (async () => {
+      if (stopped) return
       try {
-        append([JSON.parse((event as MessageEvent).data) as LogRow])
+        append(await api<LogRow[]>(`/api/logs/${encodeURIComponent(streamId)}?after=0`))
       } catch {
-        // 忽略不完整事件，轮询降级会补回持久化日志。
+        // fall through to SSE/poll
       }
-    })
-    source.onerror = () => {
-      source?.close()
-      source = undefined
-      if (!stopped && pollTimer === undefined) void poll()
-    }
+      if (stopped) return
+      source = new EventSource(`/api/events/${encodeURIComponent(streamId)}?after=${cursor}`)
+      source.addEventListener('log', (event) => {
+        try {
+          append([JSON.parse((event as MessageEvent).data) as LogRow])
+        } catch {
+          // ignore partial frames; poll fallback recovers
+        }
+      })
+      source.onerror = () => {
+        source?.close()
+        source = undefined
+        if (!stopped && pollTimer === undefined) void poll()
+      }
+    })()
 
     return () => {
       stopped = true

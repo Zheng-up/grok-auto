@@ -105,8 +105,8 @@ export function AppShell() {
         <span className="ml-2 font-medium">Grok 注册台</span>
       </header>
       <main className={clsx(
-        'w-full max-w-none p-4 sm:p-6 sm:pr-8 lg:p-8 lg:pr-10',
-        fixedViewport && 'h-[calc(100vh-4rem)] overflow-hidden lg:h-screen',
+        'w-full min-w-0 max-w-full overflow-x-hidden p-4 sm:p-6 sm:pr-8 lg:p-8 lg:pr-10',
+        fixedViewport && 'lg:h-screen lg:overflow-hidden',
       )}><Outlet /></main>
     </div>
     <GlobalTaskStatus />

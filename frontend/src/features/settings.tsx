@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { useState } from 'react'
 import { Button, Card, Field, Input, PageHeader, Select, Textarea, Toggle } from '../components/ui'
 import { api } from '../lib/api'
+import { formatDbTime } from '../lib/labels'
 
 type Settings = Record<string, string | number | boolean>
 
@@ -15,8 +16,26 @@ function SecretControl({ value, onChange }: { value: string; onChange: (value: s
   </div>
 }
 
-function NumberInput({ value, min, max, onChange }: { value: unknown; min: number; max: number; onChange: (value: number) => void }) {
-  return <Input type="number" min={min} max={max} value={Number(value ?? min)} onChange={(event) => onChange(Number(event.target.value))} />
+function NumberInput({ value, min, max, onChange }: { value: unknown; min: number; max: number; onChange: (value: number | string) => void }) {
+  // Keep raw string so the field can be cleared while editing.
+  const display = value === '' || value === null || value === undefined ? '' : String(value)
+  return <Input
+    type="number"
+    min={min}
+    max={max}
+    value={display}
+    placeholder={`${min}–${max}`}
+    onChange={(event) => {
+      const raw = event.target.value
+      if (raw === '') {
+        onChange('')
+        return
+      }
+      const number = Number(raw)
+      if (!Number.isFinite(number)) return
+      onChange(number)
+    }}
+  />
 }
 
 function SwitchSetting({ title, description, checked, onChange }: { title: string; description: string; checked: boolean; onChange: (checked: boolean) => void }) {
@@ -61,10 +80,7 @@ function formatDuration(seconds?: number) {
 }
 
 function formatWallTime(value?: string) {
-  if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
+  return formatDbTime(value, true)
 }
 
 function SettingsForm({ initial, client }: { initial: Settings; client: ReturnType<typeof useQueryClient> }) {
@@ -77,14 +93,37 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
     refetchInterval: 15000,
   })
   const save = useMutation({
-    mutationFn: () => api<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify({ values: form }) }),
+    mutationFn: () => {
+      // Only numeric fields must be filled on save. Secrets/optional strings can stay empty
+      // (backend keeps existing secrets when empty, and local solver needs no captcha key).
+      const requiredNumbers: Record<string, string> = {
+        mail_poll_timeout: '验证码轮询超时',
+        registration_retry_limit: '注册失败重试次数',
+        operation_concurrency: '操作并发数',
+        operation_retry_limit: '操作失败重试次数',
+      }
+      const values: Settings = {}
+      for (const [key, value] of Object.entries(form)) {
+        if (key.endsWith('_configured')) continue
+        if (key in requiredNumbers && (value === '' || value === null || value === undefined)) {
+          toast.error(`${requiredNumbers[key]} 不能为空`)
+          return Promise.reject(new Error('__validation__'))
+        }
+        // Empty secrets/optional text are allowed and forwarded; backend ignores empty secrets.
+        values[key] = value as string | number | boolean
+      }
+      return api<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify({ values }) })
+    },
     onSuccess: async (data) => {
       client.setQueryData(['settings'], data)
       setForm(data)
       await client.invalidateQueries({ queryKey: ['remote-session'] })
       toast.success('设置已保存')
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : '设置保存失败'),
+    onError: (error) => {
+      if (error instanceof Error && error.message === '__validation__') return
+      toast.error(error instanceof Error ? error.message : '设置保存失败')
+    },
   })
   const test = useMutation({
     mutationFn: () => api<{ ok: boolean; mode?: string; error?: string; session?: RemoteSession }>('/api/settings/test-remote', { method: 'POST', body: '{}' }),
@@ -145,21 +184,27 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
         </Card></div>
       </div>
 
-      <div id="registration-settings" className="scroll-mt-6"><Card className="border-l-4 border-l-violet-500 p-5 shadow-sm">
-        <div className="flex items-center gap-3"><span className="flex size-9 items-center justify-center rounded-lg bg-violet-50 text-violet-600 dark:bg-violet-950 dark:text-violet-400"><SlidersHorizontal size={17} /></span><div><h2 className="font-medium">注册与自动化</h2><p className="muted mt-0.5 text-xs">批次参数、代理分配和注册后的自动任务链</p></div></div>
-        <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <Field label="默认注册数（最多 25000）"><NumberInput value={form.registration_count} min={1} max={25000} onChange={(value) => set('registration_count', value)} /></Field>
-          <Field label="默认并发数（注册与账号操作，最多 50）"><NumberInput value={form.registration_concurrency} min={1} max={50} onChange={(value) => set('registration_concurrency', value)} /></Field>
-          <Field label="失败重试次数（注册与账号操作）"><NumberInput value={form.registration_retry_limit} min={0} max={5} onChange={(value) => set('registration_retry_limit', value)} /></Field>
-          <Field label="代理策略"><Select value={String(form.proxy_strategy ?? 'round_robin')} onChange={(event) => set('proxy_strategy', event.target.value)}><option value="round_robin">轮询</option><option value="random">随机</option></Select></Field>
+            <div id="registration-settings" className="scroll-mt-6"><Card className="border-l-4 border-l-violet-500 p-5 shadow-sm">
+        <div className="flex items-center gap-3"><span className="flex size-9 items-center justify-center rounded-lg bg-violet-50 text-violet-600 dark:bg-violet-950 dark:text-violet-400"><SlidersHorizontal size={17} /></span><div><h2 className="font-medium">注册设置</h2><p className="muted mt-0.5 text-xs">注册失败重试、代理策略与代理池；注册数量/并发在开始注册页设置</p></div></div>
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <Field label="失败重试次数"><NumberInput value={form.registration_retry_limit} min={0} max={5} onChange={(value) => set("registration_retry_limit", value)} /></Field>
+          <Field label="代理策略"><Select value={String(form.proxy_strategy ?? "round_robin")} onChange={(event) => set("proxy_strategy", event.target.value)}><option value="round_robin">轮询</option><option value="random">随机</option></Select></Field>
         </div>
-        <div className="mt-4"><Field label="代理池" hint="每行一个代理，内容按原文显示"><Textarea value={String(form.proxy_pool ?? '')} onChange={(event) => set('proxy_pool', event.target.value)} /></Field></div>
-        <div className="mt-6 border-t pt-5"><h3 className="text-sm font-medium">注册后自动处理</h3><p className="muted mt-1 text-xs">各任务独立执行，远端入池失败不会改变注册成功状态。</p></div>
+        <div className="mt-4"><Field label="代理池" hint="每行一个代理，内容按原文显示"><Textarea value={String(form.proxy_pool ?? "")} onChange={(event) => set("proxy_pool", event.target.value)} /></Field></div>
+      </Card></div>
+
+      <div id="operation-settings" className="scroll-mt-6"><Card className="border-l-4 border-l-amber-500 p-5 shadow-sm">
+        <div className="flex items-center gap-3"><span className="flex size-9 items-center justify-center rounded-lg bg-amber-50 text-amber-600 dark:bg-amber-950 dark:text-amber-400"><SlidersHorizontal size={17} /></span><div><h2 className="font-medium">操作设置</h2><p className="muted mt-0.5 text-xs">操作/auths 队列并发、失败重试与注册后自动任务</p></div></div>
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <Field label="并发数" hint="操作队列与 auths 队列各自独立占槽，但共用此上限"><NumberInput value={form.operation_concurrency ?? form.registration_concurrency ?? 2} min={1} max={50} onChange={(value) => set("operation_concurrency", value)} /></Field>
+          <Field label="失败重试次数"><NumberInput value={form.operation_retry_limit ?? form.registration_retry_limit ?? 1} min={0} max={5} onChange={(value) => set("operation_retry_limit", value)} /></Field>
+        </div>
+        <div className="mt-6 border-t pt-5"><h3 className="text-sm font-medium">注册后自动处理</h3><p className="muted mt-1 text-xs">自动入池走操作队列；自动生成 auths 走 auths 队列。失败不会改变注册成功状态。</p></div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <SwitchSetting title="自动生成 auths" description="注册成功后生成 OAuth/auths；自动 Build 入池依赖此结果。" checked={Boolean(form.oidc_auto_mint)} onChange={(checked) => set('oidc_auto_mint', checked)} />
-          <SwitchSetting title="自动入池 SSO" description="注册成功并获取 SSO 后，自动提交到 Grok Web。" checked={Boolean(form.remote_web_auto_push)} onChange={(checked) => set('remote_web_auto_push', checked)} />
-          <SwitchSetting title="自动入池 Build" description="auths 生成成功后，自动提交到 Grok Build。" checked={Boolean(form.remote_build_auto_push)} onChange={(checked) => set('remote_build_auto_push', checked)} />
-          <SwitchSetting title="自动入池 Console" description="注册成功并获取 SSO 后，自动提交到 Grok Console。" checked={Boolean(form.remote_console_auto_push)} onChange={(checked) => set('remote_console_auto_push', checked)} />
+          <SwitchSetting title="自动生成 auths" description="注册成功后生成 OAuth/auths；自动 Build 入池依赖此结果。" checked={Boolean(form.oidc_auto_mint)} onChange={(checked) => set("oidc_auto_mint", checked)} />
+          <SwitchSetting title="自动入池 SSO" description="注册成功并获取 SSO 后，自动提交到 Grok Web。" checked={Boolean(form.remote_web_auto_push)} onChange={(checked) => set("remote_web_auto_push", checked)} />
+          <SwitchSetting title="自动入池 Build" description="auths 生成成功后，自动提交到 Grok Build。" checked={Boolean(form.remote_build_auto_push)} onChange={(checked) => set("remote_build_auto_push", checked)} />
+          <SwitchSetting title="自动入池 Console" description="注册成功并获取 SSO 后，自动提交到 Grok Console。" checked={Boolean(form.remote_console_auto_push)} onChange={(checked) => set("remote_console_auto_push", checked)} />
         </div>
       </Card></div>
 
@@ -176,7 +221,6 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
           <Field label="Base URL"><Input value={String(form.remote_base_url ?? '')} onChange={(event) => set('remote_base_url', event.target.value)} placeholder="https://grok2api.example.com" /></Field>
           <Field label="管理员用户名"><Input value={String(form.remote_username ?? '')} onChange={(event) => set('remote_username', event.target.value)} /></Field>
           <Field label="密码 / App Key" hint={configured('remote_secret') ? '已配置，点击眼睛查看' : '尚未配置'}><SecretControl value={String(form.remote_secret ?? '')} onChange={(value) => set('remote_secret', value)} /></Field>
-          <Field label="远端操作并发数" hint="默认 4，最多 50；仅限制远端入池任务"><NumberInput value={form.remote_operation_concurrency} min={1} max={50} onChange={(value) => set('remote_operation_concurrency', value)} /></Field>
         </div>
       </Card></div>
     </div>

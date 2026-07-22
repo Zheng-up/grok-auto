@@ -98,3 +98,27 @@ export function logMessageLabel(message: string) {
   }
   return message
 }
+
+/** Parse SQLite CURRENT_TIMESTAMP (UTC, no Z) and other ISO-like times into a Date. */
+export function parseDbTime(value?: string | null): Date | null {
+  if (!value) return null
+  const raw = String(value).trim()
+  if (!raw) return null
+  // Already has timezone / Z / offset
+  if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(raw)) {
+    const date = new Date(raw)
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+  // "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS" from SQLite UTC
+  const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T')
+  const date = new Date(`${normalized}Z`)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+export function formatDbTime(value?: string | null, withDate = false): string {
+  const date = parseDbTime(value)
+  if (!date) return value || '—'
+  if (withDate) return date.toLocaleString()
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+}
+

@@ -1,31 +1,40 @@
 services:
   console:
     build: .
+    image: grok-auto-console:local
+    container_name: grok-auto
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      REG_CONSOLE_COOKIE_SECURE: ${REG_CONSOLE_COOKIE_SECURE:-0}
+      REG_CONSOLE_COOKIE_SECURE: ${REG_CONSOLE_COOKIE_SECURE:-1}
       REG_CONSOLE_SESSION_HOURS: ${REG_CONSOLE_SESSION_HOURS:-24}
       REG_CONSOLE_MAX_CONCURRENCY: ${REG_CONSOLE_MAX_CONCURRENCY:-4}
       REG_CONSOLE_LOCAL_CONCURRENCY: ${REG_CONSOLE_LOCAL_CONCURRENCY:-2}
       REG_CONSOLE_SOLVER_URL: http://solver:5072
     ports:
-      - "${REG_CONSOLE_PORT:-18080}:18080"
+      # loopback only; OpenResty terminates TLS for grokcli.zradx.com
+      - "127.0.0.1:18080:18080"
     volumes:
-      - registration-data:/app/data
+      - /opt/grok-auto/data:/app/data
     depends_on:
       solver:
         condition: service_healthy
 
   solver:
     build: ./turnstile-solver
+    image: grok-auto-solver:local
+    container_name: grok-auto-solver
     restart: unless-stopped
     shm_size: "2gb"
     environment:
       TURNSTILE_HOST: 0.0.0.0
       TURNSTILE_PORT: 5072
-      TURNSTILE_THREAD: 2
+      TURNSTILE_THREAD: ${TURNSTILE_THREAD:-1}
+      TURNSTILE_BROWSER_TYPE: ${TURNSTILE_BROWSER_TYPE:-camoufox}
     expose:
       - "5072"
 
-volumes:
-  registration-data:
+networks:
+  default:
+    name: grok-auto_default

@@ -1,7 +1,8 @@
 import clsx from 'clsx'
+import { useEffect, useRef } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, PropsWithChildren, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
 import type { LogRow } from '../lib/events'
-import { logMessageLabel, statusLabel } from '../lib/labels'
+import { formatDbTime, logMessageLabel, statusLabel } from '../lib/labels'
 
 export function Button({ className, variant = 'primary', ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'ghost' }) {
   return <button className={clsx(
@@ -48,28 +49,67 @@ export function Badge({ value }: { value: string }) {
 }
 
 function displayLog(row: LogRow) {
-  const message = logMessageLabel(row.message)
+  let message = logMessageLabel(row.message)
+  if (row.stream_id && row.stream_id.startsWith('batch_')) {
+    message = `[${row.stream_id}] ${message}`
+  }
   if (['success', 'warning', 'error'].includes(row.level)) return { message, level: row.level }
-  if (message.startsWith('[+]')) return { message, level: 'success' }
-  if (message.startsWith('[!]')) return { message, level: 'warning' }
-  if (message.startsWith('[-]')) return { message, level: 'error' }
+  if (message.includes('[+]')) return { message, level: 'success' }
+  if (message.includes('[!]')) return { message, level: 'warning' }
+  if (message.includes('[-]')) return { message, level: 'error' }
   return { message, level: 'info' }
 }
 
 export function LogViewer({ rows, className = 'h-64', emptyText = '等待任务日志…' }: { rows: LogRow[]; className?: string; emptyText?: string }) {
-  return <div className={clsx('scrollbar overflow-auto bg-neutral-950 p-3 font-mono text-xs text-neutral-300', className)}>
+  const containerRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
+  const lastCountRef = useRef(0)
+  const lastIdRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onScroll = () => {
+      // Keep following latest logs unless the user scrolls up to read history.
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+      stickToBottomRef.current = distance < 48
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const lastId = rows.length ? Number(rows[rows.length - 1]?.id) : null
+    const grew = rows.length > lastCountRef.current || (lastId != null && lastId !== lastIdRef.current)
+    lastCountRef.current = rows.length
+    lastIdRef.current = lastId
+    if (!grew && rows.length) return
+    if (!stickToBottomRef.current && rows.length) return
+    // Double rAF so layout settles after new rows render.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const node = containerRef.current
+        if (!node) return
+        node.scrollTop = node.scrollHeight
+      })
+    })
+  }, [rows])
+
+  return <div ref={containerRef} className={clsx('scrollbar overflow-auto bg-neutral-950 p-3 font-mono text-xs text-neutral-300', className)}>
     {rows.length ? <div className="space-y-1.5">{rows.map((row) => {
       const display = displayLog(row)
       return <div
         key={row.id}
         className={clsx(
-          'grid grid-cols-[64px_1fr] gap-2 rounded-md border-l-2 px-2.5 py-1.5 leading-5',
+          'grid min-w-0 grid-cols-[72px_minmax(0,1fr)] gap-2 rounded-md border-l-2 px-2.5 py-1.5 leading-5',
           display.level === 'success' && 'border-emerald-500 bg-emerald-500/10 text-emerald-300',
           display.level === 'warning' && 'border-amber-500 bg-amber-500/10 text-amber-200',
           display.level === 'error' && 'border-red-500 bg-red-500/10 text-red-300',
           display.level === 'info' && 'border-sky-500/70 bg-sky-500/5 text-neutral-300',
         )}
-      ><span className="text-neutral-600">{row.created_at.slice(11, 19)}</span><span className="break-words">{display.message}</span></div>
+      ><span className="shrink-0 text-neutral-600">{formatDbTime(row.created_at)}</span><span className="min-w-0 break-all">{display.message}</span></div>
     })}</div> : <div className="px-2 py-3 text-neutral-600">{emptyText}</div>}
   </div>
 }
