@@ -20,6 +20,8 @@ services:
     depends_on:
       solver:
         condition: service_healthy
+    networks:
+      - zradx-app
 
   solver:
     build: ./turnstile-solver
@@ -32,9 +34,15 @@ services:
       TURNSTILE_PORT: 5072
       TURNSTILE_THREAD: ${TURNSTILE_THREAD:-1}
       TURNSTILE_BROWSER_TYPE: ${TURNSTILE_BROWSER_TYPE:-camoufox}
+      TURNSTILE_PREFETCH_TTL: ${TURNSTILE_PREFETCH_TTL:-75}
     expose:
       - "5072"
+    networks:
+      zradx-app:
+        aliases:
+          - solver
 
 networks:
-  default:
-    name: grok-auto_default
+  zradx-app:
+    external: true
+    name: zradx-app

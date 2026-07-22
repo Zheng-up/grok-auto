@@ -247,16 +247,17 @@ export function RegisterPage() {
 
   return <>
     <PageHeader title="开始注册" />
-    <Card className="grid min-h-0 overflow-hidden xl:h-[calc(100vh-160px)] xl:min-h-[580px] xl:grid-cols-[minmax(560px,1.15fr)_minmax(380px,0.85fr)]">
-      <section className="flex min-h-0 flex-col border-b xl:border-b-0 xl:border-r">
-        <div className="shrink-0 border-b px-5 py-4 sm:px-7">
+    <Card className="grid min-h-0 min-w-0 overflow-x-hidden xl:h-[calc(100vh-160px)] xl:min-h-[580px] xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] xl:overflow-hidden">
+      <section className="flex min-h-0 min-w-0 flex-col border-b xl:border-b-0 xl:border-r">
+        <div className="shrink-0 border-b px-4 py-4 sm:px-7">
           <h2 className="font-medium">注册控制台</h2>
           <p className="muted mt-1 text-sm">设置参数，开始任务，并管理注册任务列表</p>
         </div>
 
-        <div className="scrollbar max-h-[min(720px,70vh)] min-h-0 overflow-auto p-4 sm:p-5 xl:max-h-none xl:flex-1">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)] sm:items-start">
-            <label className="block">
+        {/* 移动端整页滚动；桌面双栏时左侧独立滚动 */}
+        <div className="min-w-0 p-4 sm:p-5 xl:scrollbar xl:min-h-0 xl:flex-1 xl:overflow-auto">
+          <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)] sm:items-start">
+            <label className="block min-w-0">
               <span className="mb-1.5 block text-sm font-medium opacity-0 select-none">开始</span>
               <Button
                 className="h-[38px] min-h-[38px] w-full sm:w-auto sm:min-w-[7.5rem]"
@@ -283,13 +284,13 @@ export function RegisterPage() {
             </Field>
           </div>
 
-          <div className="mt-6 border-t pt-4">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="mt-6 min-w-0 border-t pt-4">
+            <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
               <div className="min-w-0">
                 <h3 className="text-sm font-medium">注册任务</h3>
                 <p className="muted mt-1 text-xs">与任务空间「注册任务」同步，一行一个批次</p>
               </div>
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                 <span className="muted mr-1 text-xs">{tasks.length} 个</span>
                 <Button
                   variant="secondary"
@@ -331,7 +332,7 @@ export function RegisterPage() {
                 暂无注册任务
               </div>
             ) : (
-              <div className="space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 {tasks.map((task) => {
                   const pct = Math.round((task.completed / Math.max(1, task.target_count)) * 100)
                   const busyRow = controlling === task.id || controlling === 'all'
@@ -339,15 +340,17 @@ export function RegisterPage() {
                   const failed = Number(task.failed ?? 0)
                   const btn = '!min-h-6 !gap-0.5 !rounded-md !px-1.5 !py-0 !text-[10px] !font-medium'
                   return (
-                    <div key={task.id} className={`rounded-lg border bg-[var(--panel)] px-2.5 py-2 ${busyRow ? 'opacity-70' : ''}`}>
-                      {/* 顶栏：状态 · ID · 9/10 · 操作 */}
-                      <div className="flex items-center gap-2">
-                        <Badge value={task.status} />
-                        <span className="min-w-0 truncate font-mono text-[11px] text-[var(--muted)]">{task.id}</span>
-                        <span className="shrink-0 text-sm font-semibold tabular-nums tracking-tight">
-                          {task.completed}<span className="font-normal text-[var(--muted)]">/{task.target_count}</span>
-                        </span>
-                        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                    <div key={task.id} className={`min-w-0 rounded-lg border bg-[var(--panel)] px-2.5 py-2 ${busyRow ? 'opacity-70' : ''}`}>
+                      {/* 顶栏：窄屏允许换行，避免右侧按钮被裁切 */}
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <Badge value={task.status} />
+                          <span className="min-w-0 truncate font-mono text-[11px] text-[var(--muted)]" title={task.id}>{task.id}</span>
+                          <span className="shrink-0 text-sm font-semibold tabular-nums tracking-tight">
+                            {task.completed}<span className="font-normal text-[var(--muted)]">/{task.target_count}</span>
+                          </span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-0.5">
                           {canPause(task.status) && (
                             <Button variant="secondary" className={btn} disabled={busyRow} onClick={() => void singleControl(task.id, 'pause')}>
                               <Pause size={11} />暂停
@@ -372,22 +375,22 @@ export function RegisterPage() {
                       </div>
 
                       {/* 进度条 + 百分比在后 */}
-                      <div className="mt-1.5 flex items-center gap-2">
+                      <div className="mt-1.5 flex min-w-0 items-center gap-2">
                         <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--soft)]">
                           <div className="h-full rounded-full bg-sky-500 transition-all duration-500" style={{ width: `${pct}%` }} />
                         </div>
                         <span className="w-9 shrink-0 text-right text-[11px] font-medium tabular-nums text-[var(--muted)]">{pct}%</span>
                       </div>
 
-                      {/* 底栏 */}
-                      <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px]">
-                        <div className="flex items-center gap-2.5">
+                      {/* 底栏：窄屏换行，时长完整可见 */}
+                      <div className="mt-1.5 flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[11px]">
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5">
                           <span className="text-[var(--muted)]">成功 <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{success}</span></span>
                           <span className="text-[var(--muted)]">失败 <span className="font-semibold tabular-nums text-red-600 dark:text-red-400">{failed}</span></span>
                         </div>
-                        <div className="flex items-center gap-2.5 text-[var(--muted)]">
-                          <span>总 <span className="font-medium tabular-nums text-[var(--strong)]">{formatDurationShort(task.elapsed_seconds)}</span></span>
-                          <span>均 <span className="font-medium tabular-nums text-[var(--strong)]">{formatDurationShort(task.avg_account_seconds)}</span></span>
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[var(--muted)]">
+                          <span className="whitespace-nowrap">总 <span className="font-medium tabular-nums text-[var(--strong)]">{formatDurationShort(task.elapsed_seconds)}</span></span>
+                          <span className="whitespace-nowrap">均 <span className="font-medium tabular-nums text-[var(--strong)]">{formatDurationShort(task.avg_account_seconds)}</span></span>
                         </div>
                       </div>
                     </div>
@@ -399,15 +402,16 @@ export function RegisterPage() {
         </div>
       </section>
 
-      <section className="flex min-h-[min(420px,48vh)] flex-col bg-neutral-950 xl:min-h-0">
+      <section className="flex min-h-[min(380px,50vh)] min-w-0 flex-col bg-neutral-950 xl:min-h-0">
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-neutral-800 px-4 py-3 text-white sm:px-5 sm:py-4">
           <div className="min-w-0">
             <h2 className="text-sm font-medium">实时注册日志</h2>
-            <p className="mt-1 text-xs text-neutral-500">所有注册任务 · 与左侧任务列表同步</p>
+            <p className="mt-1 text-xs text-neutral-500">所有注册任务 · 与任务列表同步</p>
           </div>
           <span className="shrink-0 rounded-full border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400">{tasks.length} 个任务</span>
         </div>
-        <LogViewer rows={logs} className="min-h-0 flex-1" emptyText="等待注册任务日志…" />
+        {/* 底部预留 FAB 空间，避免日志右侧/底部被遮挡 */}
+        <LogViewer rows={logs} className="min-h-0 min-w-0 flex-1 pb-24 sm:pb-3 xl:pb-3" emptyText="等待注册任务日志…" />
       </section>
     </Card>
   </>

@@ -97,19 +97,19 @@ export function LogViewer({ rows, className = 'h-64', emptyText = '等待任务�
     })
   }, [rows])
 
-  return <div ref={containerRef} className={clsx('scrollbar overflow-auto bg-neutral-950 p-3 font-mono text-xs text-neutral-300', className)}>
-    {rows.length ? <div className="space-y-1.5">{rows.map((row) => {
+  return <div ref={containerRef} className={clsx('scrollbar min-w-0 overflow-x-hidden overflow-y-auto bg-neutral-950 p-3 font-mono text-xs text-neutral-300', className)}>
+    {rows.length ? <div className="min-w-0 space-y-1.5">{rows.map((row) => {
       const display = displayLog(row)
       return <div
         key={row.id}
         className={clsx(
-          'grid min-w-0 grid-cols-[72px_minmax(0,1fr)] gap-2 rounded-md border-l-2 px-2.5 py-1.5 leading-5',
+          'grid min-w-0 grid-cols-[4.25rem_minmax(0,1fr)] gap-x-2 gap-y-0.5 rounded-md border-l-2 px-2 py-1.5 leading-5 sm:grid-cols-[72px_minmax(0,1fr)] sm:px-2.5',
           display.level === 'success' && 'border-emerald-500 bg-emerald-500/10 text-emerald-300',
           display.level === 'warning' && 'border-amber-500 bg-amber-500/10 text-amber-200',
           display.level === 'error' && 'border-red-500 bg-red-500/10 text-red-300',
           display.level === 'info' && 'border-sky-500/70 bg-sky-500/5 text-neutral-300',
         )}
-      ><span className="shrink-0 text-neutral-600">{formatDbTime(row.created_at)}</span><span className="min-w-0 break-all">{display.message}</span></div>
+      ><span className="shrink-0 tabular-nums text-neutral-600">{formatDbTime(row.created_at)}</span><span className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{display.message}</span></div>
     })}</div> : <div className="px-2 py-3 text-neutral-600">{emptyText}</div>}
   </div>
 }
