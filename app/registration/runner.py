@@ -89,6 +89,38 @@ def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
     except Exception:
         pass
 
+
+def _clear_local_solver_prefetch(cfg: dict[str, Any] | None = None) -> None:
+    """Stop background token production so Camoufox can idle-reclaim.
+
+    Safe to call when no registration batches still need tokens.
+    """
+    cfg = cfg or {}
+    if str(cfg.get("captcha_provider") or "local").lower() not in {"local", ""}:
+        # still try local URL if present
+        pass
+    base = str(cfg.get("local_solver_url") or "http://127.0.0.1:5072").rstrip("/")
+    if not base:
+        return
+
+    def _post(path: str, payload: dict[str, Any] | None = None) -> None:
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"} if payload is not None else {},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+
+    try:
+        # depth=0 without sitekey clears ALL prefetch targets (solver API).
+        _post("/prefetch", {"depth": 0})
+    except Exception:
+        pass
+
+
 class RegistrationRunner:
     def __init__(
         self,
@@ -126,6 +158,29 @@ class RegistrationRunner:
 
     def has_active_registration(self) -> bool:
         return bool(self._active_registration_ids())
+
+    def _maybe_clear_solver_prefetch(self) -> None:
+        """Clear solver prefetch when no registration is actively producing demand."""
+        active = self.db.fetch_one(
+            """
+            SELECT COUNT(*) total FROM registration_batches
+            WHERE status IN ('queued','running','stopping','pausing','waiting')
+            """
+        ) or {}
+        if int(active.get("total") or 0) > 0:
+            return
+        try:
+            cfg = self.settings.registration_config()
+        except Exception:
+            cfg = {}
+        # Fire-and-forget so batch finalize path stays fast.
+        threading.Thread(
+            target=_clear_local_solver_prefetch,
+            args=(cfg,),
+            daemon=True,
+            name="solver-prefetch-clear",
+        ).start()
+
 
 
     def _worker_alive(self, batch_id: str) -> bool:
@@ -187,6 +242,7 @@ class RegistrationRunner:
         self._workers.pop(batch_id, None)
         with self._slot_cond:
             self._slot_cond.notify_all()
+        self._maybe_clear_solver_prefetch()
 
 
     def _older_queued_demand(self, batch_id: str) -> int:
@@ -1047,6 +1103,8 @@ class RegistrationRunner:
                     f"{_log_prefix(level)} 注册批次{status_label} · 已处理 {completed} · 成功 {success} · 失败 {failed}",
                     level,
                 )
+                # Stop solver prefetch so Camoufox can idle-reclaim memory.
+                self._maybe_clear_solver_prefetch()
             elif paused and status == "paused":
                 self.events.publish(
                     batch_id,

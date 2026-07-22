@@ -89,23 +89,39 @@ class TurnstileAPIServer:
 
         # Lazy pool: do not keep Camoufox/Chromium warm while idle.
         # TURNSTILE_LAZY=1 (default) starts browsers on first solve request.
-        # TURNSTILE_IDLE_SEC (default 180) reclaims the pool after quiet period.
+        # TURNSTILE_IDLE_SEC (default 60) reclaims the pool after quiet period.
         lazy_raw = (os.getenv("TURNSTILE_LAZY", "1") or "1").strip().lower()
         self.lazy_browsers = lazy_raw not in ("0", "false", "no", "off")
         try:
-            self.idle_sec = float(os.getenv("TURNSTILE_IDLE_SEC", "180") or 180)
+            # Default 60s: long idle was keeping a bloated Camoufox process alive.
+            self.idle_sec = float(os.getenv("TURNSTILE_IDLE_SEC", "60") or 60)
         except (TypeError, ValueError):
-            self.idle_sec = 180.0
+            self.idle_sec = 60.0
         if self.idle_sec < 0:
             self.idle_sec = 0.0
+        try:
+            # Camoufox RSS grows with repeated new_context; recycle browser every N solves.
+            self._recycle_every = int(os.getenv("TURNSTILE_BROWSER_RECYCLE_EVERY", "40") or 40)
+        except (TypeError, ValueError):
+            self._recycle_every = 40
+        self._recycle_every = max(5, min(500, self._recycle_every))
+        try:
+            # If nobody consumes tokens for this long, drop prefetch targets so idle reaper can reclaim.
+            self._prefetch_consumer_idle_sec = float(os.getenv("TURNSTILE_PREFETCH_IDLE_SEC", "90") or 90)
+        except (TypeError, ValueError):
+            self._prefetch_consumer_idle_sec = 90.0
+        if self._prefetch_consumer_idle_sec < 15:
+            self._prefetch_consumer_idle_sec = 15.0
         self._pool_ready = False
         self._pool_lock: Optional[asyncio.Lock] = None
         self._owned_browsers: list = []
         self._playwright = None
         self._camoufox = None
-        self._last_used = 0.0
+        self._last_used = 0.0  # last *consumer* activity (not background prefetch)
+        self._last_consumer_used = 0.0
         self._idle_task: Optional[asyncio.Task] = None
         self._in_flight = 0
+        self._solve_counts: dict = {}  # browser index -> completed solves on this instance
 
         # Initialize useragent and sec_ch_ua attributes
         self.useragent = useragent
@@ -290,6 +306,7 @@ class TurnstileAPIServer:
         self._owned_browsers = owned
         self._pool_ready = True
         self._last_used = time.time()
+        self._solve_counts = {item[0]: 0 for item in owned}
         logger.info(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
 
         if self.use_random_config:
@@ -444,18 +461,106 @@ class TurnstileAPIServer:
             self._in_flight = 0
 
         self._pool_ready = False
+        self._solve_counts = {}
         # Keep last_used as historical activity; do not bump it here or reclaim loops thrash.
         logger.info("Browser pool reclaimed (idle / rebuild)")
 
-    async def _ensure_pool(self) -> None:
-        """Make sure the browser pool is warm before solving."""
-        self._last_used = time.time()
+
+    def _touch_consumer(self) -> None:
+        """Record real demand (API solve / warm / token consume), not prefetch refill."""
+        now = time.time()
+        self._last_used = now
+        self._last_consumer_used = now
+
+    def _clear_prefetch_all(self, reason: str = "") -> None:
+        had = bool(self._prefetch_targets or self._prefetch_tokens)
+        self._prefetch_targets.clear()
+        self._prefetch_tokens.clear()
+        if had:
+            logger.info(f"Prefetch targets cleared{(': ' + reason) if reason else ''}")
+
+    async def _return_or_recycle_browser(self, index, browser, browser_config) -> None:
+        """Put browser back, or rebuild it after N solves to cap Camoufox RSS growth."""
+        count = int(self._solve_counts.get(index, 0) or 0) + 1
+        self._solve_counts[index] = count
+        if count < self._recycle_every:
+            await self.browser_pool.put((index, browser, browser_config))
+            if self.debug:
+                logger.debug(f"Browser {index}: returned to pool (solves={count}/{self._recycle_every})")
+            return
+
+        logger.info(
+            f"Browser {index}: recycling after {count} solves "
+            f"(limit={self._recycle_every}) to reclaim memory"
+        )
+        # Remove from owned list first so shutdown-style close only hits this one.
+        self._owned_browsers = [
+            item for item in (self._owned_browsers or []) if item[0] != index
+        ]
+        closed = await self._close_maybe_async(browser, "close", "aclose", label=f"Browser {index}")
+        if not closed:
+            await self._force_kill_browser(browser, index=index)
+        else:
+            try:
+                await self._force_kill_browser(browser, index=index)
+            except Exception:
+                pass
+        self._solve_counts.pop(index, None)
+
+        # Re-create one replacement browser of the same index.
+        try:
+            if self.browser_type == "camoufox":
+                if self._camoufox is None:
+                    self._camoufox = AsyncCamoufox(headless=self.headless)
+                new_browser = await self._camoufox.start()
+            elif self.browser_type in ['chromium', 'chrome', 'msedge']:
+                if self._playwright is None:
+                    self._playwright = await async_playwright().start()
+                browser_args = [
+                    "--window-position=0,0",
+                    "--force-device-scale-factor=1",
+                ]
+                ua = (browser_config or {}).get("useragent")
+                if ua:
+                    browser_args.append(f"--user-agent={ua}")
+                new_browser = await self._playwright.chromium.launch(
+                    channel=self.browser_type,
+                    headless=self.headless,
+                    args=browser_args,
+                )
+            else:
+                new_browser = None
+            if new_browser is None:
+                logger.warning(f"Browser {index}: recycle failed to start replacement")
+                # pool slot missing — next ensure_pool will rebuild if empty
+                if not self._owned_browsers and self.browser_pool.empty():
+                    self._pool_ready = False
+                return
+            item = (index, new_browser, browser_config)
+            self._owned_browsers.append(item)
+            self._solve_counts[index] = 0
+            await self.browser_pool.put(item)
+            logger.info(f"Browser {index}: recycled and returned to pool")
+        except Exception as e:
+            logger.error(f"Browser {index}: recycle replacement failed: {e}")
+            if not self._owned_browsers and self.browser_pool.empty():
+                self._pool_ready = False
+
+    async def _ensure_pool(self, *, consumer: bool = False) -> None:
+        """Make sure the browser pool is warm before solving.
+
+        consumer=True marks real demand (API /warm, createTask). Prefetch refill
+        must pass consumer=False so idle reaper can still reclaim the pool.
+        """
+        if consumer:
+            self._touch_consumer()
         if self._pool_ready and self.browser_pool.qsize() > 0:
             return
         if self._pool_lock is None:
             self._pool_lock = asyncio.Lock()
         async with self._pool_lock:
-            self._last_used = time.time()
+            if consumer:
+                self._touch_consumer()
             if self._pool_ready and self.browser_pool.qsize() > 0:
                 return
             # Rebuild if never ready, or all instances were dropped/disconnected.
@@ -484,7 +589,16 @@ class TurnstileAPIServer:
                     stuck_since = 0.0
                     continue
 
-                idle_for = time.time() - (self._last_used or 0.0)
+                now = time.time()
+                # Drop orphan prefetch producers so they stop refreshing _last_used via solves.
+                consumer_idle = now - (self._last_consumer_used or self._last_used or 0.0)
+                if self._prefetch_targets and consumer_idle >= self._prefetch_consumer_idle_sec:
+                    self._clear_prefetch_all(
+                        f"no consumer for {consumer_idle:.0f}s "
+                        f"(limit={self._prefetch_consumer_idle_sec:.0f}s)"
+                    )
+
+                idle_for = now - (self._last_used or 0.0)
                 if idle_for < self.idle_sec:
                     stuck_since = 0.0
                     continue
@@ -1015,11 +1129,9 @@ class TurnstileAPIServer:
         last_error = "timeout"
         try:
             try:
-                await self._ensure_pool()
-                self._last_used = time.time()
+                await self._ensure_pool(consumer=False)
                 index, browser, browser_config = await self.browser_pool.get()
                 acquired = True
-                self._last_used = time.time()
             except Exception as e:
                 logger.error(f"Failed to acquire browser from pool: {e}")
                 await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": 0, "error": str(e)})
@@ -1029,7 +1141,17 @@ class TurnstileAPIServer:
                 if hasattr(browser, 'is_connected') and not browser.is_connected():
                     if self.debug:
                         logger.warning(f"Browser {index}: Browser disconnected, skipping")
-                    await self.browser_pool.put((index, browser, browser_config))
+                    # Do not put a dead browser back; drop it.
+                    self._owned_browsers = [
+                        item for item in (self._owned_browsers or []) if item[0] != index
+                    ]
+                    self._solve_counts.pop(index, None)
+                    try:
+                        await self._force_kill_browser(browser, index=index)
+                    except Exception:
+                        pass
+                    if not self._owned_browsers and self.browser_pool.empty():
+                        self._pool_ready = False
                     acquired = False
                     await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": 0, "error": "browser_disconnected"})
                     return
@@ -1321,13 +1443,23 @@ class TurnstileAPIServer:
                     except Exception:
                         connected = True
                     if connected:
-                        await self.browser_pool.put((index, browser, browser_config))
+                        await self._return_or_recycle_browser(index, browser, browser_config)
+                    else:
+                        # Drop disconnected browser from owned; next ensure rebuilds if needed.
+                        self._owned_browsers = [
+                            item for item in (self._owned_browsers or []) if item[0] != index
+                        ]
+                        self._solve_counts.pop(index, None)
+                        try:
+                            await self._force_kill_browser(browser, index=index)
+                        except Exception:
+                            pass
+                        if not self._owned_browsers and self.browser_pool.empty():
+                            self._pool_ready = False
                         if self.debug:
-                            logger.debug(f"Browser {index}: Browser returned to pool")
-                    elif self.debug:
-                        logger.warning(
-                            f"Browser {index}: Browser disconnected, not returning to pool"
-                        )
+                            logger.warning(
+                                f"Browser {index}: Browser disconnected, not returning to pool"
+                            )
             except Exception as e:
                 if self.debug:
                     logger.warning(
@@ -1336,7 +1468,7 @@ class TurnstileAPIServer:
             # Always release in-flight even on early return / unexpected exception.
             if self._in_flight > 0:
                 self._in_flight -= 1
-            self._last_used = time.time()
+            # Prefetch-driven solves intentionally do NOT refresh consumer activity.
 
 
 
@@ -1384,6 +1516,8 @@ class TurnstileAPIServer:
         else:
             self._prefetch_tokens[key] = items
         token = str(item.get("token") or "").strip()
+        if token:
+            self._touch_consumer()
         return token or None
 
     async def _solve_token_once(self, url: str, sitekey: str, action=None, cdata=None) -> str | None:
@@ -1426,6 +1560,15 @@ class TurnstileAPIServer:
                 # snapshot targets
                 targets = dict(self._prefetch_targets or {})
                 if not targets:
+                    continue
+                consumer_idle = time.time() - (self._last_consumer_used or self._last_used or 0.0)
+                # Prefer last_consumer; if never consumed but targets set at warm, allow grace from target set time.
+                if self._last_consumer_used <= 0 and self._last_used > 0:
+                    consumer_idle = time.time() - self._last_used
+                if consumer_idle >= self._prefetch_consumer_idle_sec:
+                    self._clear_prefetch_all(
+                        f"prefetch loop: consumer idle {consumer_idle:.0f}s"
+                    )
                     continue
                 for key, meta in list(targets.items()):
                     try:
@@ -1476,7 +1619,7 @@ class TurnstileAPIServer:
     async def warm(self):
         """Warm browser pool without solving a captcha."""
         try:
-            await self._ensure_pool()
+            await self._ensure_pool(consumer=True)
             return jsonify({
                 "ok": True,
                 "warmed": True,
@@ -1514,20 +1657,20 @@ class TurnstileAPIServer:
                 "ok": False,
                 "error": "websiteURL and websiteKey required when depth>0",
             }), 400
-        # warm first so first token is faster
-        try:
-            await self._ensure_pool()
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"warm failed: {e}"}), 500
         key = self._prefetch_key(url, sitekey) if url and sitekey else ""
         if depth <= 0:
             if key:
                 self._prefetch_targets.pop(key, None)
                 self._prefetch_tokens.pop(key, None)
             else:
-                self._prefetch_targets.clear()
-                self._prefetch_tokens.clear()
+                self._clear_prefetch_all("api depth=0")
+            # Allow idle reaper to reclaim sooner after explicit clear.
             return jsonify({"ok": True, "depth": 0, "cleared": True}), 200
+        # warm first so first token is faster
+        try:
+            await self._ensure_pool(consumer=True)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"warm failed: {e}"}), 500
         self._prefetch_targets[key] = {
             "depth": depth,
             "url": url,
@@ -1585,6 +1728,7 @@ class TurnstileAPIServer:
             # Keep producing in background via _prefetch_loop targets.
             return task_id, None
 
+        self._touch_consumer()
         await save_result(task_id, "turnstile", {
             "status": "CAPTCHA_NOT_READY",
             "createTime": int(time.time()),
@@ -1767,6 +1911,10 @@ class TurnstileAPIServer:
             (meta.get("sitekey") or "")[:12]: int(meta.get("depth") or 0)
             for meta in (self._prefetch_targets or {}).values()
         }
+        consumer_idle = None
+        base = self._last_consumer_used or self._last_used or 0.0
+        if base:
+            consumer_idle = round(time.time() - base, 1)
         return jsonify({
             "ok": True,
             "lazy": bool(self.lazy_browsers),
@@ -1778,9 +1926,13 @@ class TurnstileAPIServer:
             "owned": len(self._owned_browsers or []),
             "in_flight": int(self._in_flight or 0),
             "idle_for_sec": idle_for,
+            "consumer_idle_for_sec": consumer_idle,
             "prefetch_ready": prefetch_ready,
             "prefetch_targets": prefetch_targets,
             "prefetch_ttl_sec": float(self._prefetch_ttl or 75),
+            "prefetch_idle_sec": float(self._prefetch_consumer_idle_sec or 90),
+            "browser_recycle_every": int(self._recycle_every or 40),
+            "solve_counts": {str(k): int(v) for k, v in (self._solve_counts or {}).items()},
         }), 200
 
     async def reclaim(self):
@@ -1791,6 +1943,7 @@ class TurnstileAPIServer:
             owned = len(self._owned_browsers or [])
             qsize = self.browser_pool.qsize()
             in_flight = int(self._in_flight or 0)
+            self._clear_prefetch_all("manual reclaim")
             await self._shutdown_browsers()
         return jsonify({
             "ok": True,

@@ -30,11 +30,16 @@ docker rm grok-auto-solver 2>/dev/null || true
 docker run -d --name grok-auto-solver --restart unless-stopped \
   --network "$NETWORK" --network-alias solver \
   --shm-size=2g \
+  --memory="${SOLVER_MEMORY:-3g}" --memory-swap="${SOLVER_MEMORY:-3g}" \
   -e TURNSTILE_HOST=0.0.0.0 \
   -e TURNSTILE_PORT=5072 \
   -e TURNSTILE_THREAD="${TURNSTILE_THREAD:-1}" \
   -e TURNSTILE_BROWSER_TYPE="${TURNSTILE_BROWSER_TYPE:-camoufox}" \
   -e TURNSTILE_PREFETCH_TTL="${TURNSTILE_PREFETCH_TTL:-75}" \
+  -e TURNSTILE_IDLE_SEC="${TURNSTILE_IDLE_SEC:-60}" \
+  -e TURNSTILE_PREFETCH_IDLE_SEC="${TURNSTILE_PREFETCH_IDLE_SEC:-90}" \
+  -e TURNSTILE_BROWSER_RECYCLE_EVERY="${TURNSTILE_BROWSER_RECYCLE_EVERY:-40}" \
+  -e TURNSTILE_LAZY="${TURNSTILE_LAZY:-1}" \
   "$IMAGE_SOLVER"
 
 echo "[4/5] recreate console (127.0.0.1:18080)"
