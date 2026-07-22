@@ -106,6 +106,7 @@ class RegistrationRunner:
         self.queue_operation = queue_operation
         self._cancel: dict[str, threading.Event] = {}
         self._pause: dict[str, threading.Event] = {}
+        self._workers: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
         self._ACTIVE_STATUSES = {"queued", "running", "stopping", "pausing"}
         self._slot_cond = threading.Condition(self._lock)
@@ -126,6 +127,68 @@ class RegistrationRunner:
     def has_active_registration(self) -> bool:
         return bool(self._active_registration_ids())
 
+
+    def _worker_alive(self, batch_id: str) -> bool:
+        """True only when this batch has a live batch thread still running."""
+        thread = self._workers.get(batch_id)
+        if thread is not None and thread.is_alive():
+            return True
+        # Stale maps from a dead pause/stop path must not look "live".
+        if thread is not None and not thread.is_alive():
+            self._workers.pop(batch_id, None)
+            # Drop orphaned control events only when no live worker remains.
+            self._cancel.pop(batch_id, None)
+            self._pause.pop(batch_id, None)
+        elif batch_id in self._cancel or batch_id in self._pause:
+            # Maps without a tracked worker are always treated as dead after pause exit.
+            self._cancel.pop(batch_id, None)
+            self._pause.pop(batch_id, None)
+        return False
+
+    def _spawn_batch_worker(
+        self,
+        batch_id: str,
+        cfg: dict[str, Any],
+        concurrency: int,
+        cancel: threading.Event,
+        pause: threading.Event,
+    ) -> None:
+        thread = threading.Thread(
+            target=self._run_batch,
+            args=(batch_id, cfg, concurrency, cancel, pause),
+            daemon=True,
+            name=f"registration-{batch_id[-8:]}",
+        )
+        self._workers[batch_id] = thread
+        thread.start()
+
+    def _force_finalize_cancel_locked(self, batch_id: str) -> None:
+        """Cancel remaining work immediately when no worker can honor stop()."""
+        self.db.execute(
+            """
+            UPDATE registration_jobs
+            SET status='cancelled', stage='cancelled', message='任务已取消',
+                error=COALESCE(error, 'cancelled'), updated_at=CURRENT_TIMESTAMP
+            WHERE batch_id=? AND status IN ('queued', 'interrupted', 'running')
+            """,
+            (batch_id,),
+        )
+        self.db.execute(
+            """
+            UPDATE registration_batches
+            SET cancel_requested=1, pause_requested=0, updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (batch_id,),
+        )
+        self._refresh_batch_counts(batch_id, final=True, paused=False)
+        self._cancel.pop(batch_id, None)
+        self._pause.pop(batch_id, None)
+        self._workers.pop(batch_id, None)
+        with self._slot_cond:
+            self._slot_cond.notify_all()
+
+
     def _older_queued_demand(self, batch_id: str) -> int:
         """How many still-queued jobs belong to older *worker-active* batches.
 
@@ -138,8 +201,8 @@ class RegistrationRunner:
         )
         if not batch:
             return 0
-        # Live workers are tracked by cancel/pause maps.
-        live_ids = [bid for bid in self._cancel.keys() if bid != batch_id]
+        # Live workers only — stale cancel maps must not reserve slots.
+        live_ids = [bid for bid in list(self._workers.keys()) if bid != batch_id and self._worker_alive(bid)]
         if not live_ids:
             return 0
         older_live = []
@@ -256,12 +319,7 @@ class RegistrationRunner:
             daemon=True,
             name=f"solver-warm-{batch_id[-6:]}",
         ).start()
-        threading.Thread(
-            target=self._run_batch,
-            args=(batch_id, cfg, concurrency, cancel, pause),
-            daemon=True,
-            name=f"registration-{batch_id[-8:]}",
-        ).start()
+        self._spawn_batch_worker(batch_id, cfg, concurrency, cancel, pause)
         # New batch may free/rebalance capacity; start any stranded waiting workers.
         self._kick_waiting_registrations()
         return self.get_batch(batch_id) or {"id": batch_id}
@@ -269,20 +327,16 @@ class RegistrationRunner:
     def stop(self, batch_id: str) -> bool:
         with self._lock:
             batch = self.db.fetch_one("SELECT * FROM registration_batches WHERE id=?", (batch_id,))
-            if not batch or batch["status"] not in {"queued", "running", "stopping", "pausing", "paused", "waiting"}:
+            # interrupted: allow force-end leftover accounts (common after restart / dead worker)
+            if not batch or batch["status"] not in {
+                "queued", "running", "stopping", "pausing", "paused", "waiting", "interrupted"
+            }:
                 return False
-            if batch["status"] in {"paused", "waiting"}:
-                self.db.execute(
-                    "UPDATE registration_jobs SET status='cancelled',stage='cancelled',message='任务已取消',updated_at=CURRENT_TIMESTAMP WHERE batch_id=? AND status IN ('queued','interrupted')",
-                    (batch_id,),
-                )
-                self.db.execute(
-                    "UPDATE registration_batches SET cancel_requested=1,pause_requested=0,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (batch_id,),
-                )
-                self._refresh_batch_counts(batch_id, final=True)
-                self._cancel.pop(batch_id, None)
-                self._pause.pop(batch_id, None)
+            alive = self._worker_alive(batch_id)
+            # No live worker (paused/waiting/interrupted/orphan stopping) → finalize now.
+            if not alive or batch["status"] in {"paused", "waiting", "interrupted"}:
+                self._force_finalize_cancel_locked(batch_id)
+                self.events.publish(batch_id, "[!] 注册批次已结束（无活动 worker，已强制取消剩余任务）", "warning")
                 return True
             self.db.execute(
                 "UPDATE registration_batches SET cancel_requested=1,pause_requested=0,status='stopping',updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -294,6 +348,8 @@ class RegistrationRunner:
             pause.clear()
         if event:
             event.set()
+        with self._slot_cond:
+            self._slot_cond.notify_all()
         self.events.publish(batch_id, "[!] 正在停止注册批次", "warning")
         return True
 
@@ -346,8 +402,9 @@ class RegistrationRunner:
                 self._refresh_batch_counts(batch_id, final=True, paused=False)
                 return False
             batch = self.get_batch(batch_id) or batch
-            # If a worker is already alive, just clear pause and let it continue.
-            if batch_id in self._cancel and batch_id in self._pause:
+            # Only reuse when the batch thread is actually alive (pause used to leave
+            # orphaned cancel/pause maps after the worker exited).
+            if self._worker_alive(batch_id):
                 self.db.execute(
                     "UPDATE registration_batches SET cancel_requested=0,pause_requested=0,status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (batch_id,),
@@ -364,7 +421,7 @@ class RegistrationRunner:
         batch = batch or self.get_batch(batch_id)
         if not batch:
             return False
-        if batch_id in self._cancel:
+        if self._worker_alive(batch_id):
             # Worker already running — do not spawn a second one.
             self.db.execute(
                 "UPDATE registration_batches SET cancel_requested=0,pause_requested=0,status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -372,6 +429,8 @@ class RegistrationRunner:
             )
             if batch_id in self._pause:
                 self._pause[batch_id].clear()
+            if batch_id in self._cancel:
+                self._cancel[batch_id].clear()
             with self._slot_cond:
                 self._slot_cond.notify_all()
             return True
@@ -391,12 +450,7 @@ class RegistrationRunner:
             "UPDATE registration_batches SET cancel_requested=0,pause_requested=0,status='queued',updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (batch_id,),
         )
-        threading.Thread(
-            target=self._run_batch,
-            args=(batch_id, cfg, concurrency, cancel, pause),
-            daemon=True,
-            name=f"registration-{batch_id[-8:]}",
-        ).start()
+        self._spawn_batch_worker(batch_id, cfg, concurrency, cancel, pause)
         threading.Thread(
             target=_notify_local_solver,
             args=(cfg, concurrency),
@@ -404,12 +458,6 @@ class RegistrationRunner:
             name=f"solver-warm-{batch_id[-6:]}",
         ).start()
         self.events.publish(batch_id, f"[*] 注册批次已继续 · 剩余 {queued} 个账号")
-        threading.Thread(
-            target=_notify_local_solver,
-            args=(cfg, concurrency),
-            daemon=True,
-            name=f"solver-warm-{batch_id[-6:]}",
-        ).start()
         return True
 
     def _restore_resumable_jobs(self, batch_id: str) -> int:
@@ -458,7 +506,7 @@ class RegistrationRunner:
             )
             for row in waiting:
                 batch_id = str(row["id"])
-                if batch_id in self._cancel:
+                if self._worker_alive(batch_id):
                     continue  # already has a worker
                 batch = self.get_batch(batch_id)
                 if not batch:
@@ -533,7 +581,7 @@ class RegistrationRunner:
             # Start worker if none alive
             batch = self.get_batch(batch_id) or batch
             started = self._resume_now_locked(batch_id, batch)
-            if not started and batch_id not in self._cancel:
+            if not started and not self._worker_alive(batch_id):
                 # Fallback: force resume path
                 cfg = self.settings.registration_config()
                 cfg.update(batch.get("config") or {})
@@ -549,12 +597,7 @@ class RegistrationRunner:
                 pause = threading.Event()
                 self._cancel[batch_id] = cancel
                 self._pause[batch_id] = pause
-                threading.Thread(
-                    target=self._run_batch,
-                    args=(batch_id, cfg, concurrency, cancel, pause),
-                    daemon=True,
-                    name=f"registration-{batch_id[-8:]}",
-                ).start()
+                self._spawn_batch_worker(batch_id, cfg, concurrency, cancel, pause)
                 threading.Thread(
                     target=_notify_local_solver,
                     args=(cfg, concurrency),
@@ -777,12 +820,17 @@ class RegistrationRunner:
                 if not paused:
                     # Kick next waiting batch only when this one truly finished.
                     self._start_next_waiting_registration()
-            if not paused:
-                with self._lock:
-                    if self._cancel.get(batch_id) is cancel:
-                        self._cancel.pop(batch_id, None)
-                    if self._pause.get(batch_id) is pause:
-                        self._pause.pop(batch_id, None)
+            # Always drop this worker's control maps on exit. Durable pause/cancel
+            # lives in the DB; keeping orphan maps made resume "reuse" a dead worker
+            # and left stop() stuck in stopping forever.
+            with self._lock:
+                if self._cancel.get(batch_id) is cancel:
+                    self._cancel.pop(batch_id, None)
+                if self._pause.get(batch_id) is pause:
+                    self._pause.pop(batch_id, None)
+                worker = self._workers.get(batch_id)
+                if worker is None or worker is threading.current_thread() or not worker.is_alive():
+                    self._workers.pop(batch_id, None)
 
     def _run_job(
         self,

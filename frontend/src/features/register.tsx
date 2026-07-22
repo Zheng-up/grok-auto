@@ -34,7 +34,7 @@ const formatDurationShort = (seconds?: number | null) => {
 
 const canPause = (status: string) => ['queued', 'running', 'waiting'].includes(status)
 const canStart = (status: string) => status === 'paused'
-const canEnd = (status: string) => ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting'].includes(status)
+const canEnd = (status: string) => ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted'].includes(status)
 const canRetry = (status: string) => ['failed', 'partial', 'interrupted'].includes(status)
 
 export function RegisterPage() {
