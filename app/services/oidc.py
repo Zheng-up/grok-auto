@@ -14,13 +14,21 @@ from scripts.sso_to_auth_json import sso_to_token
 
 
 def _oidc_progress_label(message: str) -> str:
-    if message.startswith("OIDC device flow "):
-        return f"正在请求 Grok Build 授权 · {message.removeprefix('OIDC device flow ')}"
-    if "invalid" in message.lower():
+    text = str(message or "").strip()
+    if not text:
+        return text
+    # Detailed Device Flow steps are already Chinese and safe for task logs.
+    if text.startswith("[") or text.startswith("整轮授权重试") or text.startswith("Device Flow"):
+        return text
+    if text.startswith("OIDC device flow "):
+        return f"整轮授权重试 · {text.removeprefix('OIDC device flow ')}"
+    if "invalid" in text.lower():
         return "SSO 会话无效"
-    if "failed" in message.lower():
-        return "Grok Build 授权失败"
-    return message
+    if text.startswith("OIDC conversion failed:"):
+        return f"Grok Build 授权失败 · {text.removeprefix('OIDC conversion failed:').strip()}"
+    if "failed" in text.lower():
+        return f"Grok Build 授权失败 · {text}"
+    return text
 
 
 def _mint_with_proxy(

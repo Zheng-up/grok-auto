@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import time
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -32,10 +33,28 @@ except Exception:  # pragma: no cover
 
 
 # Defaults that match the captured Chrome 148 / Windows profile.
+# Prefer a concrete preset: bare "chrome" is flaky on some Windows curl_cffi builds.
 DEFAULT_IMPERSONATE = "chrome131"
 DEFAULT_HTTP_VERSION = "v2"  # curl_cffi: "v2" or "v3" — accounts.x.ai serves HTTP/2
 DEFAULT_ACCEPT_ENCODING = "gzip, deflate, br, zstd"
 DEFAULT_JA3: Optional[str] = None  # let curl_cffi derive from impersonate target
+
+
+def _is_tls_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "ssl",
+            "tls",
+            "curl: (35)",
+            "unexpected_eof",
+            "openssl",
+            "invalid library",
+            "eof occurred in violation of protocol",
+            "connection reset",
+        )
+    )
 
 
 class FingerprintTransport:
@@ -113,7 +132,24 @@ class FingerprintTransport:
         }
         if self._proxy:
             req_kwargs["proxies"] = {"http": self._proxy, "https": self._proxy}
-        resp = self._session.request(**req_kwargs)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                resp = self._session.request(**req_kwargs)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if not _is_tls_error(exc) or attempt >= 3:
+                    raise
+                if self._debug:
+                    print(
+                        f"  !! TLS retry {attempt}/2 {method} {url} "
+                        f"impersonate={self._impersonate}: {exc}"
+                    )
+                time.sleep(min(0.6 * attempt, 1.5))
+        if last_error is not None:
+            raise last_error
         status = resp.status_code
         raw = resp.content
         # Defensive: if server sent gzip but curl didn't decode, do it here.
