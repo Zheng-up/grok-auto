@@ -91,17 +91,22 @@ class YesCaptchaSolver:
         self._on_progress = on_progress
         self._auto_fallback_endpoint = auto_fallback_endpoint
 
+    def _brand(self) -> str:
+        return "本地 Solver" if self._is_local_endpoint() else "YesCaptcha"
+
+    def _format_error(self, stage: str, detail: str) -> str:
+        brand = self._brand()
+        return f"{brand} {stage}: {detail}".strip()
+
     def _progress(self, msg: str) -> None:
-        if self._debug:
-            print(f"  [YesCaptcha] {msg}")
+        text = str(msg or "")
+        if self._debug and text:
+            print(f"  [{self._brand()}] {text}")
         if self._on_progress:
-            # Do NOT swallow BaseException-like control flow from callers.
-            # Registration cancel raises a custom exception from on_progress so
-            # stop can interrupt captcha polling instead of waiting full timeout.
+            # Empty message = cancel probe only (no UI log line).
             try:
-                self._on_progress(msg)
+                self._on_progress(text)
             except Exception:
-                # Re-raise: cooperative cancel / hard abort must not be muted.
                 raise
 
     def _post_json(self, path: str, payload: dict, *, timeout: float = 30.0) -> dict:
@@ -111,9 +116,33 @@ class YesCaptchaSolver:
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
-                raise RuntimeError(f"YesCaptcha non-object response: {data!r}")
+                raise RuntimeError(self._format_error("响应异常", repr(data)))
             return data
         except Exception as first_err:
+            if self._is_local_endpoint():
+                err = str(first_err or "")
+                lowered = err.lower()
+                if any(
+                    marker in lowered
+                    for marker in (
+                        "connection refused",
+                        "actively refused",
+                        "failed to establish",
+                        "max retries",
+                        "name or service not known",
+                        "nodename nor servname",
+                        "10061",
+                        "连接被拒绝",
+                        "无法连接",
+                    )
+                ):
+                    raise RuntimeError(
+                        f"本地 Turnstile Solver 未启动或不可达（{self._endpoint}）。"
+                        f"请先运行 启动Solver.bat 后再注册。原始错误：{err[:120]}"
+                    ) from first_err
+                raise RuntimeError(
+                    self._format_error(f"请求 {path} 失败", err[:160])
+                ) from first_err
             if not self._auto_fallback_endpoint:
                 raise
             # Network / DNS / TLS issues: try the other region once
@@ -144,13 +173,15 @@ class YesCaptchaSolver:
 
         if data.get("errorId", 0) != 0:
             raise RuntimeError(
-                f"YesCaptcha createTask failed: "
-                f"{data.get('errorCode')}: {data.get('errorDescription')}"
+                self._format_error(
+                    "createTask 失败",
+                    f"{data.get('errorCode')}: {data.get('errorDescription')}",
+                )
             )
 
         task_id = data.get("taskId")
         if not task_id:
-            raise RuntimeError(f"YesCaptcha createTask returned no taskId: {data}")
+            raise RuntimeError(self._format_error("createTask 无 taskId", str(data)[:160]))
 
         self._progress(f"task created: {task_id}")
         return str(task_id)
@@ -171,8 +202,10 @@ class YesCaptchaSolver:
 
             if data.get("errorId", 0) != 0:
                 raise RuntimeError(
-                    f"YesCaptcha getTaskResult error: "
-                    f"{data.get('errorCode')}: {data.get('errorDescription')}"
+                    self._format_error(
+                        "getTaskResult 失败",
+                        f"{data.get('errorCode')}: {data.get('errorDescription')}",
+                    )
                 )
 
             status = str(data.get("status") or "")
@@ -180,35 +213,37 @@ class YesCaptchaSolver:
                 self._progress(f"solved in ~{int(time.time() - started)}s")
                 return data
             if status in ("processing", "idle", ""):
-                # YesCaptcha may omit status or use idle while queuing
+                # Log at most every ~10s. Between logs, silent cancel probes only
+                # (empty message) so stop stays responsive without UI spam.
                 elapsed = int(time.time() - started)
-                if status != last_status or elapsed % 9 < self._poll_interval:
-                    # Progress callback may raise cancel from registration worker.
+                last_logged = int(getattr(self, "_last_progress_elapsed", -99))
+                if status != last_status or elapsed == 0 or elapsed - last_logged >= 10:
                     self._progress(
                         f"still processing ({elapsed}s/{int(self._timeout)}s)..."
                     )
+                    self._last_progress_elapsed = elapsed
                 last_status = status or "processing"
-                # Sleep in short slices so cancel via on_progress is responsive.
                 slept = 0.0
                 interval = max(0.2, float(self._poll_interval or 2.0))
                 while slept < interval:
-                    # Emit lightweight progress ticks so cancel can land mid-wait.
-                    if slept > 0:
+                    if self._on_progress:
                         try:
-                            self._progress(
-                                f"waiting poll slice {slept:.1f}/{interval:.1f}s..."
-                            )
+                            self._on_progress("")  # cancel probe only
                         except Exception:
                             raise
                     step = min(0.25, interval - slept)
                     time.sleep(step)
                     slept += step
                 continue
-            raise RuntimeError(f"YesCaptcha unexpected status: {status} body={data}")
+            raise RuntimeError(
+                self._format_error("unexpected status", f"{status} body={data}")
+            )
 
         raise TimeoutError(
-            f"YesCaptcha task {task_id} did not complete within {self._timeout}s "
-            f"(endpoint={self._endpoint})"
+            self._format_error(
+                "超时",
+                f"task {task_id} 未在 {self._timeout}s 内完成",
+            )
         )
 
     def _is_local_endpoint(self) -> bool:
@@ -272,9 +307,11 @@ class YesCaptchaSolver:
             )
         except (TypeError, ValueError):
             outer_rounds = 2
-        # Local already multi-rounds inside Camoufox; keep outer pass lean.
+        # Local already multi-rounds inside Camoufox; still allow a third outer pass
+        # because CF intermittently returns empty/unsolvable tokens.
         if local:
-            outer_rounds = min(outer_rounds, 2)
+            outer_rounds = max(outer_rounds, 3)
+            outer_rounds = min(outer_rounds, 4)
         outer_rounds = max(1, min(4, outer_rounds))
 
         errors: list[str] = []
@@ -321,7 +358,7 @@ class YesCaptchaSolver:
                         or solution.get("cf_clearance")
                     )
                     if not token:
-                        raise RuntimeError(f"YesCaptcha returned no token: {result}")
+                        raise RuntimeError(self._format_error("无 token", str(result)[:160]))
                     return str(token)
                 except Exception as e:  # noqa: BLE001
                     msg = f"outer{outer}/{task_type}: {e}"
@@ -341,16 +378,14 @@ class YesCaptchaSolver:
                         break
                     # Non-retriable terminal (e.g. bad key / unsupported task)
                     raise RuntimeError(
-                        "YesCaptcha Turnstile solve failed after fallbacks: "
-                        + " | ".join(errors[:6])
+                        self._format_error("过盾失败", " | ".join(errors[:6]))
                     ) from e
             else:
                 # for-task_types completed without break — no more work this outer
                 pass
 
         raise RuntimeError(
-            "YesCaptcha Turnstile solve failed after fallbacks: "
-            + " | ".join(errors[:6])
+            self._format_error("过盾失败（已重试）", " | ".join(errors[:6]))
         )
 
     def solve_cloudflare_challenge(

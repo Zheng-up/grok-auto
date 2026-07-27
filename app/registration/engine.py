@@ -20,10 +20,14 @@ from app.vendor.grok_build_auth.xconsole_client import XConsoleAuthClient, YesCa
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 SIGNIN_URL = "https://accounts.x.ai/sign-in?redirect=grok-com"
 _LOCAL_CAPTCHA_LIMIT = threading.BoundedSemaphore(runtime.local_solver_max_concurrency)
+# chrome120 is known-bad for accounts.x.ai on some Windows curl_cffi builds.
+# Prefer newer concrete presets that this environment can actually handshake.
 _TLS_IMPERSONATE_CANDIDATES = (
     os.getenv("GROK2API_CURL_IMPERSONATE", "chrome131").strip() or "chrome131",
+    "chrome136",
+    "chrome142",
     "chrome124",
-    "chrome120",
+    "chrome133a",
 )
 
 
@@ -39,8 +43,31 @@ def _is_tls_error(exc: BaseException) -> bool:
         "connection reset",
         "eof occurred in violation of protocol",
         "invalid library",
+        "recv failure",
+        "send failure",
+        "timed out",
+        "timeout",
     )
     return any(marker in text for marker in markers)
+
+
+def _short_tls_error(exc: BaseException) -> str:
+    text = re.sub(r"\s+", " ", str(exc or "").strip())
+    if not text:
+        return type(exc).__name__
+    # Keep operator logs short and secret-free.
+    for marker in (
+        "OPENSSL_internal:",
+        "curl: (35)",
+        "UNEXPECTED_EOF",
+        "SSLError",
+        "TLS connect error",
+    ):
+        idx = text.lower().find(marker.lower())
+        if idx >= 0:
+            text = text[idx:]
+            break
+    return text[:140]
 
 
 def _password() -> str:
@@ -74,8 +101,10 @@ def _solve_turnstile(
         timeout=120,
         poll_interval=2,
         auto_fallback_endpoint=not local,
-        on_progress=lambda message: context.update(
-            RegistrationStage.TURNSTILE, f"Turnstile 验证：{message}"
+        on_progress=lambda message: (
+            context.check_cancelled()
+            if not str(message or "").strip()
+            else context.update(RegistrationStage.TURNSTILE, f"Turnstile 验证：{message}")
         ),
     )
     solve = lambda: solver.solve_turnstile(
@@ -254,50 +283,71 @@ class RegistrationEngine:
         try:
             context.update(RegistrationStage.SIGNUP_PAGE, "正在加载 xAI 注册协议")
             last_tls_error: Exception | None = None
+            client = None
             for impersonate in dict.fromkeys(_TLS_IMPERSONATE_CANDIDATES):
-                client = None
-                try:
-                    client = XConsoleAuthClient(
-                        debug=False,
-                        proxy=request.proxy or None,
-                        signup_url=SIGNUP_URL,
-                        impersonate=impersonate,
-                    )
-                    # Transient TLS failures are common on Windows curl_cffi builds.
-                    for attempt in range(1, 4):
+                # Fresh client/session per fingerprint. Reusing a poisoned curl
+                # handle after OPENSSL_internal/EOF is a common hang source.
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    client = None
+                opened = False
+                for attempt in range(1, 3):
+                    context.check_cancelled()
+                    try:
+                        client = XConsoleAuthClient(
+                            debug=False,
+                            proxy=request.proxy or None,
+                            signup_url=SIGNUP_URL,
+                            impersonate=impersonate,
+                            timeout=20.0,
+                        )
+                        # console.x.ai is best-effort only. Real protocol scrape
+                        # happens on accounts.x.ai signup page.
                         try:
                             client.visit_home()
-                            client.load_signup_page()
-                            last_tls_error = None
-                            break
-                        except Exception as exc:
-                            last_tls_error = exc
-                            if not _is_tls_error(exc) or attempt >= 3:
+                        except Exception as home_exc:
+                            if not _is_tls_error(home_exc):
                                 raise
                             context.update(
                                 RegistrationStage.SIGNUP_PAGE,
-                                f"TLS 连接失败，正在重试 {attempt}/2 · {impersonate}",
+                                f"console 预热 TLS 失败，继续直连注册页 · {impersonate}",
                             )
-                            time.sleep(min(2.0 * attempt, 4.0))
-                    if last_tls_error is None:
+                        client.load_signup_page()
+                        last_tls_error = None
+                        opened = True
                         break
-                except Exception as exc:
-                    last_tls_error = exc
-                    if client is not None:
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-                        client = None
-                    if not _is_tls_error(exc):
-                        raise
-                    context.update(
-                        RegistrationStage.SIGNUP_PAGE,
-                        f"TLS 指纹失败，切换浏览器配置 · {impersonate}",
-                    )
-                    continue
+                    except Exception as exc:
+                        last_tls_error = exc
+                        if client is not None:
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
+                            client = None
+                        if not _is_tls_error(exc):
+                            raise
+                        detail = _short_tls_error(exc)
+                        if attempt < 2:
+                            context.update(
+                                RegistrationStage.SIGNUP_PAGE,
+                                f"TLS 连接失败，正在重试 {attempt}/1 · {impersonate} · {detail}",
+                            )
+                            time.sleep(min(1.2 * attempt, 2.0))
+                            continue
+                        context.update(
+                            RegistrationStage.SIGNUP_PAGE,
+                            f"TLS 指纹失败，切换浏览器配置 · {impersonate} · {detail}",
+                        )
+                if opened:
+                    break
             if client is None:
-                raise last_tls_error or RuntimeError("failed to open xAI signup page")
+                detail = _short_tls_error(last_tls_error) if last_tls_error else "unknown"
+                raise last_tls_error or RuntimeError(
+                    f"failed to open xAI signup page · {detail}"
+                )
             context.update(RegistrationStage.TURNSTILE, "正在进行 Turnstile 验证")
             turnstile = _solve_turnstile(client, request, context)
             context.update(RegistrationStage.TURNSTILE, "Turnstile 验证通过")

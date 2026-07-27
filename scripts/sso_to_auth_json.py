@@ -22,14 +22,15 @@ _IMPERSONATE = os.getenv("GROK2API_CURL_IMPERSONATE", "chrome131").strip() or "c
 _DEVICE_PAGE_BASE = os.getenv("GROK2API_DEVICE_PAGE_BASE", "https://accounts.x.ai").rstrip("/")
 _DEVICE_API_BASE = os.getenv("GROK2API_DEVICE_API_BASE", OIDC_ISSUER or "https://auth.x.ai").rstrip("/")
 
-# Full scopes first; fall back to the shorter CPA-compatible set on Access denied.
-_SCOPE_FULL = (
+# Align with CLIProxyAPI internal/auth/xai/types.go Scope (CPA / Grok Build).
+# Extra conversation scopes historically correlated with invalid_grant · Access denied.
+_SCOPE_CPA = (
     os.getenv("GROK2API_OIDC_SCOPES", OIDC_SCOPES)
-    or "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write"
+    or "openid profile email offline_access grok-cli:access api:access"
 ).strip()
-_SCOPE_MIN = os.getenv(
-    "GROK2API_OIDC_SCOPES_MIN",
-    "openid profile email offline_access grok-cli:access api:access",
+_SCOPE_FULL = os.getenv(
+    "GROK2API_OIDC_SCOPES_FULL",
+    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
 ).strip()
 
 _DEVICE_FLOW_LOCK = threading.RLock()
@@ -59,7 +60,8 @@ def _http_timeout() -> float:
 
 
 def _device_flow_retries() -> int:
-    return _env_int("GROK2API_SSO_DEVICE_RETRIES", 8, 1, 16)
+    # cpa + full is enough; Access denied is permanent and must not spin 8 rounds.
+    return _env_int("GROK2API_SSO_DEVICE_RETRIES", 2, 1, 16)
 
 
 def _backoff(attempt: int) -> float:
@@ -103,6 +105,12 @@ def _proxy_kwargs() -> dict[str, Any]:
             ),
             "",
         )
+    lower = value.lower()
+    # curl_cffi + socks5:// (local DNS) often hits OPENSSL_internal:invalid library.
+    if lower.startswith("socks5://"):
+        value = "socks5h://" + value.split("://", 1)[1]
+    elif lower.startswith("socks4://") or lower.startswith("socks4a://"):
+        value = "socks4h://" + value.split("://", 1)[1]
     return {"proxies": {"http": value, "https": value}} if value else {}
 
 
@@ -437,6 +445,10 @@ def _request_device_code(
     return None
 
 
+class DeviceFlowFatalError(RuntimeError):
+    """Permanent device-flow rejection; do not start another full round."""
+
+
 def _poll_token(
     session: Any,
     device: dict[str, Any],
@@ -495,25 +507,31 @@ def _poll_token(
             desc = str((payload or {}).get("error_description") or "") if payload else ""
             last_error = " · ".join(part for part in (error, desc) if part) or _response_hint(response)
             if error == "authorization_pending":
-                report(f"[6/6] 换 token 等待授权完成 · POST {endpoint} · authorization_pending")
+                report(f"[6/6] 换 token 等待授权完成 · authorization_pending")
                 continue
             if error == "slow_down":
                 interval = min(10.0, interval + 1.0)
-                report(f"[6/6] 换 token 限速 · POST {endpoint} · slow_down")
+                report(f"[6/6] 换 token 限速 · slow_down")
                 continue
-            # "Access denied" is a permanent rejection for this device_code, not a race.
-            if error == "invalid_grant" and "access denied" not in desc.lower() and time.time() < invalid_grant_retry_until:
-                report(
-                    f"[6/6] 换 token 暂态 invalid_grant，短暂重试 · POST {endpoint} · {last_error}"
-                )
+            # Permanent: Access denied — fake approve / low-trust session.
+            if error in {"access_denied", "invalid_grant"} and "access denied" in desc.lower():
+                report(f"[6/6] 换 token 永久拒绝 · {last_error}")
+                raise DeviceFlowFatalError(last_error)
+            if error == "invalid_grant" and time.time() < invalid_grant_retry_until:
+                report(f"[6/6] 换 token 暂态 invalid_grant，短暂重试 · {last_error}")
                 interval = max(interval, 0.8)
                 continue
-            report(f"[6/6] 换 token 失败 · POST {endpoint} · {last_error}")
+            if error in {"access_denied", "expired_token"}:
+                report(f"[6/6] 换 token 永久失败 · {last_error}")
+                raise DeviceFlowFatalError(last_error)
+            report(f"[6/6] 换 token 失败 · {last_error}")
             return None
+        except DeviceFlowFatalError:
+            raise
         except Exception as exc:
             last_error = _response_hint(error=exc)
             continue
-    report(f"[6/6] 换 token 超时 · POST {endpoint} · last={last_error or 'none'}")
+    report(f"[6/6] 换 token 超时 · last={last_error or 'none'}")
     return None
 
 
@@ -542,16 +560,16 @@ def _approve_device(
     verify_url = f"{_DEVICE_API_BASE}/oauth2/device/verify"
     user_code = str(device.get("user_code") or "").strip()
     try:
-        report(f"[3/6] 打开验证页 · GET {page_url}")
+        report(f"[3/6] 打开验证页")
         page = session.get(
             page_url,
             impersonate=_IMPERSONATE,
             timeout=_http_timeout(),
             **_proxy_kwargs(),
         )
-        report(f"[3/6] 打开验证页完成 · {_response_hint(page)}")
+        report(f"[3/6] 打开验证页完成 · status={getattr(page, 'status_code', '?')}")
 
-        report(f"[4/6] 校验 user_code · POST {verify_url}")
+        report("[4/6] 校验 user_code")
         verified = session.post(
             verify_url,
             data={"user_code": user_code},
@@ -563,7 +581,7 @@ def _approve_device(
         )
         verified_url = str(verified.url or "")
         consent_html = str(getattr(verified, "text", "") or "")
-        report(f"[4/6] 校验 user_code 完成 · {_response_hint(verified)}")
+        report(f"[4/6] 校验完成 · consent={'yes' if _looks_like_consent(verified_url) else 'no'}")
         # Only trust the final URL path. Account HTML pages may contain the word
         # "consent" and previously caused false positives.
         if not _looks_like_consent(verified_url):
@@ -595,11 +613,9 @@ def _approve_device(
             if next_action:
                 headers["next-action"] = next_action
             report(
-                f"[5/6] 批准授权尝试 {index}/{len(targets)} · POST {approve_url} · "
-                f"principal_id={'yes' if approve_form.get('principal_id') else 'no'} · "
-                f"hidden={len(hidden_keys)} · "
-                f"next_action={'yes' if next_action else 'no'} · "
-                f"source={'html' if html_principal else ('sso' if principal_id else 'empty')}"
+                f"[5/6] 批准 {index}/{len(targets)} · "
+                f"principal={'yes' if approve_form.get('principal_id') else 'no'} · "
+                f"hidden={len(hidden_keys)}"
             )
             approved = session.post(
                 approve_url,
@@ -611,11 +627,11 @@ def _approve_device(
                 **_proxy_kwargs(),
             )
             approved_url = str(approved.url or "")
-            report(f"[5/6] 批准授权完成 · {_response_hint(approved)}")
+            report(f"[5/6] 批准完成 · done={'yes' if _looks_like_done(approved_url) else 'no'}")
             if _looks_like_done(approved_url):
                 return True, _rate_limited(approved)
             last_rate_limited = _rate_limited(approved)
-            report(f"[5/6] 批准授权未到 done 页 · final_url={approved_url or 'empty'}")
+            report(f"[5/6] 未到 done · url={approved_url or 'empty'}")
         return False, last_rate_limited
     except Exception as exc:
         report(f"[3-5/6] 验证/批准异常 · {_response_hint(error=exc)}")
@@ -663,25 +679,25 @@ def sso_to_token(
             report("[1/6] SSO 会话无效 · 跳转到登录/注册页")
             return None
         retries = _device_flow_retries()
-        scope_candidates = [_SCOPE_FULL]
-        if _SCOPE_MIN and _SCOPE_MIN != _SCOPE_FULL:
-            scope_candidates.append(_SCOPE_MIN)
+        # 焚绝 / CPA：优先 CPA scope；仅在仍 Access denied 时再试 full 一次。
+        scope_candidates = [_SCOPE_CPA]
+        if _SCOPE_FULL and _SCOPE_FULL != _SCOPE_CPA:
+            scope_candidates.append(_SCOPE_FULL)
         for attempt in range(1, retries + 1):
             scope = scope_candidates[(attempt - 1) % len(scope_candidates)]
             report(
-                f"整轮授权重试 {attempt}/{retries} · "
-                f"page={_DEVICE_PAGE_BASE} · api={_DEVICE_API_BASE} · "
-                f"scope={'min' if scope == _SCOPE_MIN else 'full'}"
+                f"整轮授权 {attempt}/{retries} · "
+                f"scope={'cpa' if scope == _SCOPE_CPA else 'full'}"
             )
-            report(f"[2/6] 申请 device code · POST {_DEVICE_API_BASE}/oauth2/device/code")
+            report(f"[2/6] 申请 device code")
             device = _request_device_code(session, report, scope=scope)
             if not device:
-                report("[2/6] 本轮未拿到 device_code · 准备下一轮（若还有）")
+                report("[2/6] 本轮未拿到 device_code")
             else:
                 complete = str(device.get("verification_uri_complete") or "")
                 report(
-                    f"[2/6] device 元数据 · has_complete={'yes' if complete else 'no'} · "
-                    f"interval={device.get('interval')} · expires_in={device.get('expires_in')}"
+                    f"[2/6] device 就绪 · user_code={device.get('user_code')} · "
+                    f"has_complete={'yes' if complete else 'no'}"
                 )
                 approved, rate_limited = _approve_device(
                     session,
@@ -690,17 +706,27 @@ def sso_to_token(
                     principal_id=principal_id,
                 )
                 if approved:
-                    report(f"[6/6] 换 token · POST {_DEVICE_API_BASE}/oauth2/token")
-                    result = _poll_token(session, device, report)
-                    if result:
-                        report("Device Flow 完成 · 已拿到 OAuth token")
-                        return result
-                    report("[6/6] 本轮换 token 失败 · 准备下一轮（若还有）")
+                    report("[6/6] 换 token")
+                    try:
+                        result = _poll_token(session, device, report)
+                    except DeviceFlowFatalError as exc:
+                        # Access denied after done is permanent for this SSO/session shape.
+                        # Try the alternate scope once if available, then stop.
+                        next_scope_left = attempt < len(scope_candidates) and attempt < retries
+                        if next_scope_left and scope == _SCOPE_CPA and _SCOPE_FULL != _SCOPE_CPA:
+                            report(f"[6/6] 永久拒绝，切换 scope 再试一轮 · {exc}")
+                        else:
+                            report(f"[6/6] 永久拒绝，停止重试 · {exc}")
+                            return None
+                    else:
+                        if result:
+                            report("Device Flow 完成 · 已拿到 OAuth token")
+                            return result
+                        report("[6/6] 本轮换 token 失败")
                 elif rate_limited:
-                    report("[3-5/6] 验证/批准触发限流 · 将重试整轮")
+                    report("[3-5/6] 验证/批准限流 · 将重试")
                 else:
-                    # Do not abort the whole mint on a single bad verify/approve bounce.
-                    report("[3-5/6] 验证/批准失败 · 准备下一轮（若还有）")
+                    report("[3-5/6] 验证/批准失败")
             if attempt < retries:
                 time.sleep(_backoff(attempt))
         report(f"Device Flow 全部重试耗尽 · {retries}/{retries}")

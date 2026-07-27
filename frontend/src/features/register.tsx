@@ -34,7 +34,9 @@ const formatDurationShort = (seconds?: number | null) => {
 
 const canPause = (status: string) => ['queued', 'running', 'waiting'].includes(status)
 const canStart = (status: string) => status === 'paused'
-const canEnd = (status: string) => ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted'].includes(status)
+// 所有任务空间状态都应可结束（失败卡也要能关掉）
+const canEnd = (status: string) =>
+  ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted', 'failed', 'partial'].includes(status)
 const canRetry = (status: string) => ['failed', 'partial', 'interrupted'].includes(status)
 
 export function RegisterPage() {

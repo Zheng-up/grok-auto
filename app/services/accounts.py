@@ -165,6 +165,15 @@ class AccountService:
             (self.box.encrypt(json.dumps(oidc, ensure_ascii=False)), cpa_file, account_id),
         )
 
+    def update_sso(self, account_id: str, sso: str) -> None:
+        value = str(sso or "").strip()
+        if not value:
+            raise ValueError("sso is required")
+        self.db.execute(
+            "UPDATE accounts SET sso_enc=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (self.box.encrypt(value), account_id),
+        )
+
     def set_status(self, account_id: str, field: str, status: str, error: str | None = None) -> None:
         error_field = {
             "oidc_status": "oidc_error",

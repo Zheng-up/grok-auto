@@ -39,6 +39,28 @@ def _log_prefix(level: str) -> str:
 
 
 
+def _require_local_solver(cfg: dict[str, Any]) -> None:
+    """Fail fast when captcha_provider=local but Solver is down."""
+    if str(cfg.get("captcha_provider") or "local").lower() != "local":
+        return
+    base = str(cfg.get("local_solver_url") or "http://127.0.0.1:5072").rstrip("/")
+    if not base:
+        raise RuntimeError("本地 Solver URL 为空，请在设置里填写 local_solver_url")
+    last_err = ""
+    for path in ("/health", "/"):
+        try:
+            req = urllib.request.Request(f"{base}{path}", method="GET")
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                resp.read(256)
+            return
+        except Exception as exc:
+            last_err = str(exc)
+    raise RuntimeError(
+        f"本地 Turnstile Solver 未启动或不可达（{base}）。"
+        f"请先运行 启动Solver.bat，再开始注册。详情：{last_err[:140]}"
+    )
+
+
 def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
     """Warm Camoufox and set token prefetch depth = registration concurrency.
 
@@ -335,6 +357,7 @@ class RegistrationRunner:
         )
         if cfg.get("captcha_provider") == "local":
             concurrency = min(concurrency, runtime.local_solver_max_concurrency)
+            _require_local_solver(cfg)
         batch_id = f"batch_{uuid.uuid4().hex[:14]}"
         public_cfg = {
             key: value
@@ -383,14 +406,25 @@ class RegistrationRunner:
     def stop(self, batch_id: str) -> bool:
         with self._lock:
             batch = self.db.fetch_one("SELECT * FROM registration_batches WHERE id=?", (batch_id,))
+            if not batch:
+                return False
+            status = str(batch["status"] or "")
+            # Failed/partial cards: dismiss from task space (end should work for all).
+            if status in {"failed", "partial"}:
+                self.db.execute(
+                    "UPDATE registration_batches SET cancel_requested=1,pause_requested=0,status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (batch_id,),
+                )
+                self.events.publish(batch_id, "[!] 失败注册批次已结束并移出任务空间", "warning")
+                return True
             # interrupted: allow force-end leftover accounts (common after restart / dead worker)
-            if not batch or batch["status"] not in {
+            if status not in {
                 "queued", "running", "stopping", "pausing", "paused", "waiting", "interrupted"
             }:
                 return False
             alive = self._worker_alive(batch_id)
             # No live worker (paused/waiting/interrupted/orphan stopping) → finalize now.
-            if not alive or batch["status"] in {"paused", "waiting", "interrupted"}:
+            if not alive or status in {"paused", "waiting", "interrupted"}:
                 self._force_finalize_cancel_locked(batch_id)
                 self.events.publish(batch_id, "[!] 注册批次已结束（无活动 worker，已强制取消剩余任务）", "warning")
                 return True

@@ -48,14 +48,16 @@ const GROUP_META: Record<TaskGroup, { label: string; className: string }> = {
 // paused:   start, end
 // queued/running: pause, end
 // pausing/stopping: end
-// failed/partial/interrupted: retry
+// failed/partial/interrupted: retry + end (dismiss)
 const regCanPause = (status: string) => ['queued', 'running', 'waiting'].includes(status)
 const regCanStart = (status: string) => status === 'paused'
-const regCanEnd = (status: string) => ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted'].includes(status)
+const regCanEnd = (status: string) =>
+  ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted', 'failed', 'partial'].includes(status)
 const regCanRetry = (status: string) => FAILED_STATUSES.has(status)
-const opCanPause = (status: string) => ['queued', 'running'].includes(status)
+const opCanPause = (status: string) => ['queued', 'running', 'waiting'].includes(status)
 const opCanStart = (status: string) => status === 'paused'
-const opCanEnd = (status: string) => ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting'].includes(status)
+const opCanEnd = (status: string) =>
+  ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'failed', 'partial', 'interrupted'].includes(status)
 const opCanRetry = (status: string) => FAILED_STATUSES.has(status)
 
 export function GlobalTaskStatus() {
@@ -102,7 +104,6 @@ export function GlobalTaskStatus() {
   const queuedCount = tasks.filter((task) => task.status === 'queued').length
   const runningCount = tasks.filter((task) => ['running', 'stopping', 'pausing'].includes(task.status)).length
   const waitingCount = tasks.filter((task) => task.status === 'waiting').length
-  const registrationWaitingCount = tasks.filter((task) => task.kind === 'batch' && task.status === 'waiting').length
   const pausedCount = tasks.filter((task) => task.status === 'paused').length
   const failedCount = tasks.filter((task) => FAILED_STATUSES.has(task.status)).length
   const activeCount = queuedCount + runningCount + waitingCount
@@ -114,8 +115,6 @@ export function GlobalTaskStatus() {
     const retried = await api<{ id: string }>(endpoint, { method: 'POST' })
     if (task.kind === 'batch') localStorage.setItem('active-registration-batch', retried.id)
   }
-
-  const retryWaiting = (task: TaskSpaceTask) => api<{ ok: boolean }>(`/api/operations/${task.id}/retry-waiting`, { method: 'POST' })
 
   const retry = async (task: TaskSpaceTask) => {
     if (retrying || controlling) return
@@ -265,9 +264,19 @@ export function GlobalTaskStatus() {
   const endAll = async () => {
     if (controlling || retrying) return
     // End only registration batches that are active/paused/waiting
-    const endable = tasks.filter((task) => task.kind === 'batch' && ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted'].includes(task.status))
+    const endable = tasks.filter(
+      (task) =>
+        (task.kind === 'batch' &&
+          ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted', 'failed', 'partial'].includes(
+            task.status,
+          )) ||
+        (task.kind === 'operation' &&
+          ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'failed', 'partial', 'interrupted'].includes(
+            task.status,
+          )),
+    )
     if (!endable.length) return
-    if (!window.confirm(`确认结束 ${endable.length} 个注册批次？未完成账号将取消。`)) return
+    if (!window.confirm(`确认结束 ${endable.length} 个任务？进行中的会取消，失败的会移出任务空间。`)) return
     setControlling('all')
     let succeeded = 0
     let failed = 0
@@ -285,7 +294,7 @@ export function GlobalTaskStatus() {
       setControlling(undefined)
     }
     if (failed) toast.warning(`批量结束完成：成功 ${succeeded}，失败 ${failed}`)
-    else toast.success(`已结束 ${succeeded} 个注册批次`)
+    else toast.success(`已结束 ${succeeded} 个任务`)
   }
 
   useEffect(() => {
@@ -334,7 +343,7 @@ export function GlobalTaskStatus() {
         <div className="mt-2 flex flex-wrap items-center gap-1">
           <button type="button" style={{ fontSize: 9 }} className="inline-flex h-6 items-center justify-center gap-0.5 rounded-md border bg-[var(--panel)] px-1.5 font-medium leading-none transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!tasks.some((task) => ['queued', 'running'].includes(task.status) || (task.kind === 'batch' && task.status === 'waiting')) || Boolean(controlling) || Boolean(retrying)} onClick={() => void pauseAll()}><Pause size={10} />暂停</button>
           <button type="button" style={{ fontSize: 9 }} className="inline-flex h-6 items-center justify-center gap-0.5 rounded-md border bg-[var(--panel)] px-1.5 font-medium leading-none transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!pausedCount || Boolean(controlling) || Boolean(retrying)} onClick={() => void resumeAll()}><Play size={10} />启动</button>
-          <button type="button" style={{ fontSize: 9 }} className="inline-flex h-6 items-center justify-center gap-0.5 rounded-md border bg-[var(--panel)] px-1.5 font-medium leading-none transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!tasks.some((task) => task.kind === 'batch' && ['queued','running','stopping','pausing','paused','waiting','interrupted'].includes(task.status)) || Boolean(controlling) || Boolean(retrying)} onClick={() => void endAll()}><CircleStop size={10} />结束</button>
+          <button type="button" style={{ fontSize: 9 }} className="inline-flex h-6 items-center justify-center gap-0.5 rounded-md border bg-[var(--panel)] px-1.5 font-medium leading-none transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!tasks.some((task) => (task.kind === 'batch' ? regCanEnd(task.status) : opCanEnd(task.status))) || Boolean(controlling) || Boolean(retrying)} onClick={() => void endAll()}><CircleStop size={10} />结束</button>
           <button type="button" style={{ fontSize: 9 }} className="inline-flex h-6 items-center justify-center gap-0.5 rounded-md border bg-[var(--panel)] px-1.5 font-medium leading-none transition hover:bg-[var(--soft)] disabled:pointer-events-none disabled:opacity-45" disabled={!failedCount || Boolean(retrying) || Boolean(controlling)} onClick={() => void retryAll()}><RotateCcw className={retrying === 'all' ? 'animate-spin' : ''} size={10} />重试</button>
         </div>
       </div>

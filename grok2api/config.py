@@ -8,9 +8,10 @@ DATA_DIR = ROOT / "data"
 AUTH_FILE = Path(os.getenv("GROK2API_AUTH_FILE", DATA_DIR / "auth.json"))
 GROK_CLI_CLIENT_ID = os.getenv("GROK2API_OIDC_CLIENT_ID", "b1a00492-073a-47ea-816f-4c329264a828")
 OIDC_ISSUER = os.getenv("GROK2API_OIDC_ISSUER", "https://auth.x.ai")
+# Must match CLIProxyAPI internal/auth/xai/types.go Scope (Grok Build / CPA).
 OIDC_SCOPES = os.getenv(
     "GROK2API_OIDC_SCOPES",
-    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+    "openid profile email offline_access grok-cli:access api:access",
 )
 MOEMAIL_API_KEY = os.getenv("MOEMAIL_API_KEY", "")
 MOEMAIL_BASE_URL = os.getenv("MOEMAIL_BASE_URL", "")

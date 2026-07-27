@@ -35,7 +35,9 @@ except Exception:  # pragma: no cover
 # Defaults that match the captured Chrome 148 / Windows profile.
 # Prefer a concrete preset: bare "chrome" is flaky on some Windows curl_cffi builds.
 DEFAULT_IMPERSONATE = "chrome131"
-DEFAULT_HTTP_VERSION = "v2"  # curl_cffi: "v2" or "v3" — accounts.x.ai serves HTTP/2
+# Let curl_cffi pick HTTP version from the impersonate profile. Forcing "v2"
+# has been observed to stick broken sessions longer after mid-handshake TLS fails.
+DEFAULT_HTTP_VERSION: Optional[str] = None
 DEFAULT_ACCEPT_ENCODING = "gzip, deflate, br, zstd"
 DEFAULT_JA3: Optional[str] = None  # let curl_cffi derive from impersonate target
 
@@ -53,8 +55,24 @@ def _is_tls_error(exc: BaseException) -> bool:
             "invalid library",
             "eof occurred in violation of protocol",
             "connection reset",
+            "wrong version number",
+            "recv failure",
+            "send failure",
         )
     )
+
+
+def _normalize_proxy(proxy: Optional[str]) -> Optional[str]:
+    """Prefer remote-DNS SOCKS schemes for curl_cffi TLS stability."""
+    value = (proxy or "").strip()
+    if not value:
+        return None
+    lower = value.lower()
+    if lower.startswith("socks5://"):
+        return "socks5h://" + value.split("://", 1)[1]
+    if lower.startswith("socks4://") or lower.startswith("socks4a://"):
+        return "socks4h://" + value.split("://", 1)[1]
+    return value
 
 
 class FingerprintTransport:
@@ -71,7 +89,7 @@ class FingerprintTransport:
         self,
         *,
         impersonate: str = DEFAULT_IMPERSONATE,
-        http_version: str = DEFAULT_HTTP_VERSION,
+        http_version: Optional[str] = DEFAULT_HTTP_VERSION,
         accept_encoding: str = DEFAULT_ACCEPT_ENCODING,
         timeout: float = 30.0,
         debug: bool = False,
@@ -83,24 +101,37 @@ class FingerprintTransport:
             )
         self._impersonate = impersonate
         self._http_version = http_version
+        self._accept_encoding = accept_encoding
         self._timeout = timeout
         self._debug = debug
-        self._proxy = (proxy or "").strip() or None
-        # A new Session per client. The browser-equivalent fingerprint is
-        # established by `impersonate=`; it is fixed for the session's life.
-        self._session = cc_requests.Session(
-            impersonate=impersonate,
-            http_version=http_version,
-            ja3=DEFAULT_JA3,
-        )
-        # Make sure default Accept-Encoding is exactly the Chrome order.
-        self._session.headers["accept-encoding"] = accept_encoding
-        # Apply proxy if provided (was previously accepted but ignored).
+        self._proxy = _normalize_proxy(proxy)
+        self._session = self._new_session()
+
+    def _new_session(self):
+        # Keep Session kwargs minimal — extra forced options can pin a bad
+        # BoringSSL state after OPENSSL_internal / UNEXPECTED_EOF failures.
+        kwargs = {"impersonate": self._impersonate}
+        if self._http_version:
+            kwargs["http_version"] = self._http_version
+        if DEFAULT_JA3 is not None:
+            kwargs["ja3"] = DEFAULT_JA3
+        session = cc_requests.Session(**kwargs)
+        session.headers["accept-encoding"] = self._accept_encoding
         if self._proxy:
-            self._session.proxies = {
+            session.proxies = {
                 "http": self._proxy,
                 "https": self._proxy,
             }
+        return session
+
+    def _reset_session(self) -> None:
+        old = getattr(self, "_session", None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        self._session = self._new_session()
 
     # ----------------------------------------------------------------- transport
     def request(
@@ -133,21 +164,25 @@ class FingerprintTransport:
         if self._proxy:
             req_kwargs["proxies"] = {"http": self._proxy, "https": self._proxy}
         last_error: Exception | None = None
-        for attempt in range(1, 4):
+        # Keep this shallow: outer registration engine already rotates fingerprints.
+        # Recreate the Session on TLS failure — reusing a poisoned curl handle is a
+        # common Windows curl_cffi failure mode (OPENSSL_internal:invalid library).
+        for attempt in range(1, 3):
             try:
                 resp = self._session.request(**req_kwargs)
                 last_error = None
                 break
             except Exception as exc:
                 last_error = exc
-                if not _is_tls_error(exc) or attempt >= 3:
+                if not _is_tls_error(exc) or attempt >= 2:
                     raise
                 if self._debug:
                     print(
-                        f"  !! TLS retry {attempt}/2 {method} {url} "
+                        f"  !! TLS reset {attempt}/1 {method} {url} "
                         f"impersonate={self._impersonate}: {exc}"
                     )
-                time.sleep(min(0.6 * attempt, 1.5))
+                self._reset_session()
+                time.sleep(min(0.4 * attempt, 1.0))
         if last_error is not None:
             raise last_error
         status = resp.status_code
@@ -165,8 +200,9 @@ class FingerprintTransport:
         set_cookies = _split_set_cookie(raw_sc) if raw_sc else []
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         if self._debug:
+            http_label = self._http_version or "auto"
             print(f"  <- {status} {method} {url}  ({len(raw)} bytes, {len(set_cookies)} set-cookie, "
-                  f"impersonate={self._impersonate}, http={self._http_version})")
+                  f"impersonate={self._impersonate}, http={http_label})")
         return status, hdrs, set_cookies, raw
 
     @property
@@ -180,7 +216,10 @@ class FingerprintTransport:
         return c() if callable(c) else c
 
     def close(self):
-        self._session.close()
+        try:
+            self._session.close()
+        except Exception:
+            pass
 
 
 def _split_set_cookie(joined: str) -> List[str]:

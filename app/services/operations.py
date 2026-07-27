@@ -140,9 +140,20 @@ class OperationManager:
     def stop(self, operation_id: str) -> bool:
         with self._lock:
             operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
-            if not operation or operation["status"] not in {"queued", "running", "waiting", "stopping", "pausing", "paused"}:
+            if not operation:
                 return False
-            if operation["status"] == "paused":
+            status = str(operation["status"] or "")
+            # Terminal failed cards: dismiss from task space (all statuses must be endable).
+            if status in {"failed", "partial", "interrupted"}:
+                self.db.execute(
+                    "UPDATE operation_jobs SET cancel_requested=1,pause_requested=0,status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (operation_id,),
+                )
+                self.events.publish(operation_id, "[!] 失败任务已结束并移出任务空间", "warning")
+                return True
+            if status not in {"queued", "running", "waiting", "stopping", "pausing", "paused"}:
+                return False
+            if status == "paused":
                 with self.db.transaction() as conn:
                     conn.execute(
                         "UPDATE operation_items SET status='cancelled',message='任务已取消' WHERE operation_id=? AND status='queued'",

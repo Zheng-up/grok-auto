@@ -119,6 +119,24 @@ def split_proxy_text(text: str | None) -> list[str]:
     return out
 
 
+def prefer_remote_dns_proxy(proxy_url: str | None) -> str:
+    """Normalize proxy URL for curl_cffi / libcurl TLS via SOCKS.
+
+    On Windows, ``socks5://`` (local DNS) frequently fails HTTPS through
+    residential SOCKS with ``OPENSSL_internal:invalid library``. ``socks5h://``
+    resolves the target host on the proxy side and is stable with curl_cffi.
+    """
+    s = (proxy_url or "").strip()
+    if not s:
+        return ""
+    lower = s.lower()
+    if lower.startswith("socks5://"):
+        return "socks5h://" + s.split("://", 1)[1]
+    if lower.startswith("socks4://") or lower.startswith("socks4a://"):
+        return "socks4h://" + s.split("://", 1)[1]
+    return s
+
+
 def _normalize_line_scheme(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
@@ -196,7 +214,7 @@ def canonicalize_proxy_line(
     )
     if not cfg or not cfg.get("proxy"):
         raise ValueError("invalid proxy")
-    return str(cfg["proxy"])
+    return prefer_remote_dns_proxy(str(cfg["proxy"]))
 
 
 def parse_proxy_pool(
@@ -400,13 +418,13 @@ def _mask_proxy_url(url: str) -> str:
 
 def httpx_proxy_arg(proxy_url: str | None) -> str | None:
     """httpx Client(proxy=...) expects a single URL string (or None)."""
-    s = (proxy_url or "").strip()
+    s = prefer_remote_dns_proxy(proxy_url)
     return s or None
 
 
 def curl_proxies_arg(proxy_url: str | None) -> dict[str, str] | None:
     """curl_cffi / requests style proxies dict."""
-    s = (proxy_url or "").strip()
+    s = prefer_remote_dns_proxy(proxy_url)
     if not s:
         return None
     return {"http": s, "https": s}
