@@ -17,7 +17,6 @@ DEFAULTS: dict[str, Any] = {
     "local_solver_url": os.getenv("REG_CONSOLE_SOLVER_URL", "http://127.0.0.1:5072"),
     # Single knob for local Turnstile capacity:
     # - browser pool size (solver THREAD)
-    # - prefetch depth auto-derives as registration_concurrency + this value
     "solver_browser_threads": 2,
     "proxy_pool": "",
     "proxy_strategy": "round_robin",

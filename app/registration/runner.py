@@ -38,6 +38,26 @@ def _log_prefix(level: str) -> str:
     return {"success": "[+]", "warning": "[!]", "error": "[-]"}.get(level, "[*]")
 
 
+def _format_duration_cn(seconds: float | int | None) -> str:
+    """Human duration for operator logs: 12秒 / 1分5秒 / 1时2分3秒."""
+    try:
+        total = int(round(float(seconds or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    total = max(0, total)
+    if total < 60:
+        return f"{total}秒"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}分{secs}秒" if secs else f"{minutes}分"
+    hours, minutes = divmod(minutes, 60)
+    if secs:
+        return f"{hours}时{minutes}分{secs}秒"
+    if minutes:
+        return f"{hours}时{minutes}分"
+    return f"{hours}时"
+
+
 
 def _require_local_solver(cfg: dict[str, Any]) -> None:
     """Fail fast when captcha_provider=local but Solver is down."""
@@ -69,48 +89,19 @@ def _solver_browser_threads(cfg: dict[str, Any]) -> int:
     return max(1, min(10, threads))
 
 
-def _solver_prefetch_depth(cfg: dict[str, Any], concurrency: int) -> int:
-    """One settings field drives both capacity knobs.
-
-    solver_browser_threads:
-      - solver browser pool size
-      - prefetch depth = registration_concurrency + threads (capped 1..20)
-    """
-    threads = _solver_browser_threads(cfg)
-    try:
-        base_conc = max(1, int(concurrency or 1))
-    except (TypeError, ValueError):
-        base_conc = 1
-    return max(1, min(20, base_conc + threads))
-
 
 def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
-    """Warm Camoufox, apply browser threads, and set token prefetch depth.
+    """Apply browser thread count and warm Camoufox.
 
-    Prefetch websiteURL MUST match engine.SIGNUP_URL used by createTask, otherwise
-    tokens sit in the wrong bucket and every account falls back to live solve.
-
-    Best-effort only — registration continues even if solver is busy/unreachable.
+    Prefetch was removed: under full load it competed with live solves for the
+    same browser pool and rarely helped. Best-effort only.
     """
     if str(cfg.get("captcha_provider") or "local").lower() != "local":
         return
     base = str(cfg.get("local_solver_url") or "http://127.0.0.1:5072").rstrip("/")
     if not base:
         return
-    depth = _solver_prefetch_depth(cfg, concurrency)
     threads = _solver_browser_threads(cfg)
-    # Public sitekey used by signup; dynamic scrape may differ but this is good enough
-    # for warming and typical prefetches. createTask still works without prefetch.
-    try:
-        from app.registration.engine import SIGNUP_URL as engine_signup_url
-        from app.vendor.grok_build_auth.xconsole_client import config as protocol_config
-        sitekey = str(getattr(protocol_config, "TURNSTILE_SITEKEY", "") or "").strip()
-        signup_url = str(engine_signup_url or "").strip()
-    except Exception:
-        sitekey = "0x4AAAAAAAhr9JGVDZbrZOo0"
-        signup_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
-    if not signup_url:
-        signup_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
     def _post(path: str, payload: dict[str, Any] | None = None) -> None:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -123,7 +114,6 @@ def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
         with urllib.request.urlopen(req, timeout=8) as resp:
             resp.read()
 
-    # Apply runtime browser pool size before warm/prefetch.
     try:
         _post("/config", {"thread": threads})
     except Exception:
@@ -132,50 +122,7 @@ def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
         _post("/warm", {})
     except Exception:
         pass
-    if not sitekey:
-        return
-    try:
-        _post(
-            "/prefetch",
-            {
-                "websiteURL": signup_url,
-                "websiteKey": sitekey,
-                "depth": depth,
-            },
-        )
-    except Exception:
-        pass
 
-
-def _clear_local_solver_prefetch(cfg: dict[str, Any] | None = None) -> None:
-    """Stop background token production so Camoufox can idle-reclaim.
-
-    Safe to call when no registration batches still need tokens.
-    """
-    cfg = cfg or {}
-    if str(cfg.get("captcha_provider") or "local").lower() not in {"local", ""}:
-        # still try local URL if present
-        pass
-    base = str(cfg.get("local_solver_url") or "http://127.0.0.1:5072").rstrip("/")
-    if not base:
-        return
-
-    def _post(path: str, payload: dict[str, Any] | None = None) -> None:
-        data = None if payload is None else json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base}{path}",
-            data=data,
-            headers={"Content-Type": "application/json"} if payload is not None else {},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            resp.read()
-
-    try:
-        # depth=0 without sitekey clears ALL prefetch targets (solver API).
-        _post("/prefetch", {"depth": 0})
-    except Exception:
-        pass
 
 
 class RegistrationRunner:
@@ -215,29 +162,6 @@ class RegistrationRunner:
 
     def has_active_registration(self) -> bool:
         return bool(self._active_registration_ids())
-
-    def _maybe_clear_solver_prefetch(self) -> None:
-        """Clear solver prefetch when no registration is actively producing demand."""
-        active = self.db.fetch_one(
-            """
-            SELECT COUNT(*) total FROM registration_batches
-            WHERE status IN ('queued','running','stopping','pausing','waiting')
-            """
-        ) or {}
-        if int(active.get("total") or 0) > 0:
-            return
-        try:
-            cfg = self.settings.registration_config()
-        except Exception:
-            cfg = {}
-        # Fire-and-forget so batch finalize path stays fast.
-        threading.Thread(
-            target=_clear_local_solver_prefetch,
-            args=(cfg,),
-            daemon=True,
-            name="solver-prefetch-clear",
-        ).start()
-
 
 
     def _worker_alive(self, batch_id: str) -> bool:
@@ -299,7 +223,6 @@ class RegistrationRunner:
         self._workers.pop(batch_id, None)
         with self._slot_cond:
             self._slot_cond.notify_all()
-        self._maybe_clear_solver_prefetch()
 
 
     def _older_queued_demand(self, batch_id: str) -> int:
@@ -426,7 +349,7 @@ class RegistrationRunner:
             batch_id,
             f"[*] 注册批次已创建 · 数量 {count} · 全局槽位 {self.global_concurrency()}",
         )
-        # Warm Camoufox + prefetch N one-shot tokens (N = concurrency).
+        # Warm Camoufox / apply browser thread count.
         threading.Thread(
             target=_notify_local_solver,
             args=(cfg, concurrency),
@@ -1167,13 +1090,34 @@ class RegistrationRunner:
                     "cancelled": "已取消",
                 }.get(status, status)
                 level = "success" if status == "completed" else "warning"
+                # Wall-clock total + per-account average for operator logs.
+                try:
+                    fresh = self.db.fetch_one(
+                        "SELECT id,status,completed,created_at,updated_at FROM registration_batches WHERE id=?",
+                        (batch_id,),
+                    ) or {}
+                    stats = self._with_duration_stats(
+                        {
+                            "id": batch_id,
+                            "status": status,
+                            "completed": completed,
+                            "created_at": fresh.get("created_at") or batch.get("created_at"),
+                            "updated_at": fresh.get("updated_at") or batch.get("updated_at"),
+                        }
+                    )
+                    elapsed = int(stats.get("elapsed_seconds") or 0)
+                    avg = stats.get("avg_account_seconds")
+                except Exception:
+                    elapsed = 0
+                    avg = None
+                duration_part = f" · 总 {_format_duration_cn(elapsed)}"
+                if avg is not None:
+                    duration_part += f" · 均 {_format_duration_cn(avg)}"
                 self.events.publish(
                     batch_id,
-                    f"{_log_prefix(level)} 注册批次{status_label} · 已处理 {completed} · 成功 {success} · 失败 {failed}",
+                    f"{_log_prefix(level)} 注册批次{status_label} · 已处理 {completed} · 成功 {success} · 失败 {failed}{duration_part}",
                     level,
                 )
-                # Stop solver prefetch so Camoufox can idle-reclaim memory.
-                self._maybe_clear_solver_prefetch()
             elif paused and status == "paused":
                 self.events.publish(
                     batch_id,
