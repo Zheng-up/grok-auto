@@ -100,6 +100,7 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
         mail_poll_timeout: '验证码轮询超时',
         registration_retry_limit: '注册失败重试次数',
         operation_concurrency: '操作并发数',
+        solver_browser_threads: 'Turnstile 并行度',
         operation_retry_limit: '操作失败重试次数',
       }
       const values: Settings = {}
@@ -179,6 +180,7 @@ function SettingsForm({ initial, client }: { initial: Settings; client: ReturnTy
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <Field label="验证服务"><Select value={String(form.captcha_provider ?? 'local')} onChange={(event) => set('captcha_provider', event.target.value)}><option value="local">本地 Solver</option><option value="yescaptcha">YesCaptcha</option></Select></Field>
             <Field label="本地 Solver URL"><Input value={String(form.local_solver_url ?? '')} onChange={(event) => set('local_solver_url', event.target.value)} /></Field>
+            <Field label="Turnstile 并行度" hint="一个字段同时控制：浏览器数 + 预取深度(=注册并发+此值)。建议 2，机器吃紧用 1，范围 1–10"><NumberInput value={form.solver_browser_threads ?? 2} min={1} max={10} onChange={(value) => set('solver_browser_threads', value)} /></Field>
             <Field label="服务密钥" hint={configured('captcha_api_key') ? '已配置，点击眼睛查看' : '仅第三方服务需要'}><SecretControl value={String(form.captcha_api_key ?? '')} onChange={(value) => set('captcha_api_key', value)} /></Field>
           </div>
         </Card></div>

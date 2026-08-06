@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CircleStop, Pause, Play, RotateCcw } from 'lucide-react'
+import { CircleStop, Pause, Play, RotateCcw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../lib/api'
 import { useEventLog } from '../lib/events'
@@ -34,7 +34,7 @@ const formatDurationShort = (seconds?: number | null) => {
 
 const canPause = (status: string) => ['queued', 'running', 'waiting'].includes(status)
 const canStart = (status: string) => status === 'paused'
-// 所有任务空间状态都应可结束（失败卡也要能关掉）
+// 所有任务空间状态都应可结束(失败卡也要能关掉)
 const canEnd = (status: string) =>
   ['queued', 'running', 'stopping', 'pausing', 'paused', 'waiting', 'interrupted', 'failed', 'partial'].includes(status)
 const canRetry = (status: string) => ['failed', 'partial', 'interrupted'].includes(status)
@@ -45,6 +45,8 @@ export function RegisterPage() {
   const [concurrency, setConcurrency] = useState('2')
   const [selectedBatchId, setSelectedBatchId] = useState<string | undefined>(() => localStorage.getItem(ACTIVE_BATCH_KEY) || undefined)
   const [controlling, setControlling] = useState<string>()
+  const [clearingLogs, setClearingLogs] = useState(false)
+  const [logResetKey, setLogResetKey] = useState(0)
 
   const preferences = useQuery({
     queryKey: ['settings'],
@@ -76,7 +78,7 @@ export function RegisterPage() {
     if (selectedBatchId) localStorage.setItem(ACTIVE_BATCH_KEY, selectedBatchId)
   }, [selectedBatchId])
 
-  const logs = useEventLog('registration')
+  const logs = useEventLog('registration', logResetKey)
 
   useEffect(() => {
     if (!preferences.data) return
@@ -107,6 +109,21 @@ export function RegisterPage() {
       selectedBatchId ? client.invalidateQueries({ queryKey: ['batch', selectedBatchId] }) : Promise.resolve(),
     ])
   }
+
+  const clearRegistrationLogs = async () => {
+    if (clearingLogs || !window.confirm('确认清空全部注册日志？仅删除日志，不会结束或删除注册任务。')) return
+    setClearingLogs(true)
+    try {
+      await api('/api/logs/registration', { method: 'DELETE' })
+      setLogResetKey((value) => value + 1)
+      toast.success('注册日志已清空')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '清空日志失败')
+    } finally {
+      setClearingLogs(false)
+    }
+  }
+
 
   const parsePositiveInt = (raw: string, label: string, min: number, max: number) => {
     const trimmed = raw.trim()
@@ -208,7 +225,7 @@ export function RegisterPage() {
     tasks.filter((task) => canStart(task.status)),
     {
       empty: '没有可启动的注册任务',
-      ok: (n) => n > 1 ? `已启动 ${n} 个注册任务（共享全局并发槽位）` : `已启动 ${n} 个注册任务`,
+      ok: (n) => n > 1 ? `已启动 ${n} 个注册任务(共享全局并发槽位)` : `已启动 ${n} 个注册任务`,
       mixed: (ok, fail) => `批量启动完成：成功 ${ok}，失败 ${fail}`,
     },
   )
@@ -410,7 +427,18 @@ export function RegisterPage() {
             <h2 className="text-sm font-medium">实时注册日志</h2>
             <p className="mt-1 text-xs text-neutral-500">所有注册任务 · 与任务列表同步</p>
           </div>
-          <span className="shrink-0 rounded-full border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400">{tasks.length} 个任务</span>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="rounded-full border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400">{tasks.length} 个任务</span>
+            <Button
+              variant="ghost"
+              className="h-8 border border-neutral-700 px-2.5 text-xs text-neutral-300 hover:bg-neutral-800 hover:text-white"
+              disabled={clearingLogs}
+              onClick={() => void clearRegistrationLogs()}
+            >
+              <Trash2 size={14} />
+              {clearingLogs ? '清空中' : '清空日志'}
+            </Button>
+          </div>
         </div>
         {/* 底部预留 FAB 空间，避免日志右侧/底部被遮挡 */}
         <LogViewer rows={logs} className="min-h-0 min-w-0 flex-1 pb-24 sm:pb-3 xl:pb-3" emptyText="等待注册任务日志…" />

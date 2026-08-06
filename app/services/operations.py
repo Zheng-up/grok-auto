@@ -185,17 +185,42 @@ class OperationManager:
     def pause(self, operation_id: str) -> bool:
         with self._lock:
             operation = self.db.fetch_one("SELECT status FROM operation_jobs WHERE id=?", (operation_id,))
-            if not operation or operation["status"] not in {"queued", "running"}:
+            if not operation or operation["status"] not in {"queued", "running", "waiting"}:
                 return False
+            status = str(operation["status"] or "")
+            pause = self._pause.get(operation_id)
+            # Rate-limit waiting without a live control Event: pause must be durable
+            # immediately, otherwise the card sits in "pausing" forever.
+            if status == "waiting" and pause is None:
+                self.db.execute(
+                    """
+                    UPDATE operation_items
+                    SET status='queued', message='等待继续'
+                    WHERE operation_id=? AND status IN ('waiting', 'running')
+                    """,
+                    (operation_id,),
+                )
+                self.db.execute(
+                    "UPDATE operation_jobs SET pause_requested=1,status='paused',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (operation_id,),
+                )
+                self.events.publish(operation_id, "[!] 账号操作已暂停（限流等待中）", "warning")
+                return True
             self.db.execute(
                 "UPDATE operation_jobs SET pause_requested=1,status='pausing',updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (operation_id,),
             )
-            pause = self._pause.get(operation_id)
             if pause:
                 pause.set()
         with self._slots:
             self._slots.notify_all()
+        # Wake remote cooldown waiters so pause is noticed without waiting full TTL.
+        try:
+            from app.services import remote as remote_mod
+            with remote_mod._REMOTE_COOLDOWN:
+                remote_mod._REMOTE_COOLDOWN.notify_all()
+        except Exception:
+            pass
         self.events.publish(operation_id, "[!] 正在暂停账号操作", "warning")
         return True
 

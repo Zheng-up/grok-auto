@@ -15,6 +15,10 @@ DEFAULTS: dict[str, Any] = {
     "captcha_provider": "local",
     "captcha_api_key": "",
     "local_solver_url": os.getenv("REG_CONSOLE_SOLVER_URL", "http://127.0.0.1:5072"),
+    # Single knob for local Turnstile capacity:
+    # - browser pool size (solver THREAD)
+    # - prefetch depth auto-derives as registration_concurrency + this value
+    "solver_browser_threads": 2,
     "proxy_pool": "",
     "proxy_strategy": "round_robin",
     "registration_count": 10,
@@ -41,6 +45,7 @@ INT_RANGES = {
     "operation_retry_limit": (0, 5),
     "mail_poll_timeout": (30, 600),
     "remote_operation_concurrency": (1, 50),
+    "solver_browser_threads": (1, 10),
 }
 CHOICES = {
     "mail_provider": {"cfmail", "moemail", "yyds", "gptmail", "tempmail"},

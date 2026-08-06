@@ -30,10 +30,11 @@ docker rm grok-auto-solver 2>/dev/null || true
 docker run -d --name grok-auto-solver --restart unless-stopped \
   --network "$NETWORK" --network-alias solver \
   --shm-size=2g \
-  --memory="${SOLVER_MEMORY:-3g}" --memory-swap="${SOLVER_MEMORY:-3g}" \
+  --memory="${SOLVER_MEMORY:-6g}" --memory-swap="${SOLVER_MEMORY:-6g}" \
   -e TURNSTILE_HOST=0.0.0.0 \
   -e TURNSTILE_PORT=5072 \
-  -e TURNSTILE_THREAD="${TURNSTILE_THREAD:-1}" \
+  -e TURNSTILE_THREAD="${TURNSTILE_THREAD:-2}" \
+  -e TURNSTILE_THREAD_MAX="${TURNSTILE_THREAD_MAX:-10}" \
   -e TURNSTILE_BROWSER_TYPE="${TURNSTILE_BROWSER_TYPE:-camoufox}" \
   -e TURNSTILE_PREFETCH_TTL="${TURNSTILE_PREFETCH_TTL:-75}" \
   -e TURNSTILE_IDLE_SEC="${TURNSTILE_IDLE_SEC:-60}" \

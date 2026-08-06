@@ -61,8 +61,34 @@ def _require_local_solver(cfg: dict[str, Any]) -> None:
     )
 
 
+def _solver_browser_threads(cfg: dict[str, Any]) -> int:
+    try:
+        threads = int(cfg.get("solver_browser_threads") or 2)
+    except (TypeError, ValueError):
+        threads = 2
+    return max(1, min(10, threads))
+
+
+def _solver_prefetch_depth(cfg: dict[str, Any], concurrency: int) -> int:
+    """One settings field drives both capacity knobs.
+
+    solver_browser_threads:
+      - solver browser pool size
+      - prefetch depth = registration_concurrency + threads (capped 1..20)
+    """
+    threads = _solver_browser_threads(cfg)
+    try:
+        base_conc = max(1, int(concurrency or 1))
+    except (TypeError, ValueError):
+        base_conc = 1
+    return max(1, min(20, base_conc + threads))
+
+
 def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
-    """Warm Camoufox and set token prefetch depth = registration concurrency.
+    """Warm Camoufox, apply browser threads, and set token prefetch depth.
+
+    Prefetch websiteURL MUST match engine.SIGNUP_URL used by createTask, otherwise
+    tokens sit in the wrong bucket and every account falls back to live solve.
 
     Best-effort only — registration continues even if solver is busy/unreachable.
     """
@@ -71,16 +97,20 @@ def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
     base = str(cfg.get("local_solver_url") or "http://127.0.0.1:5072").rstrip("/")
     if not base:
         return
-    depth = max(1, min(20, int(concurrency or 1)))
+    depth = _solver_prefetch_depth(cfg, concurrency)
+    threads = _solver_browser_threads(cfg)
     # Public sitekey used by signup; dynamic scrape may differ but this is good enough
     # for warming and typical prefetches. createTask still works without prefetch.
     try:
+        from app.registration.engine import SIGNUP_URL as engine_signup_url
         from app.vendor.grok_build_auth.xconsole_client import config as protocol_config
         sitekey = str(getattr(protocol_config, "TURNSTILE_SITEKEY", "") or "").strip()
-        signup_url = str(getattr(protocol_config, "SIGNUP_URL", "") or "https://accounts.x.ai/sign-up?redirect=cloud-console").strip()
+        signup_url = str(engine_signup_url or "").strip()
     except Exception:
         sitekey = "0x4AAAAAAAhr9JGVDZbrZOo0"
-        signup_url = "https://accounts.x.ai/sign-up?redirect=cloud-console"
+        signup_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
+    if not signup_url:
+        signup_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
     def _post(path: str, payload: dict[str, Any] | None = None) -> None:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -93,6 +123,11 @@ def _notify_local_solver(cfg: dict[str, Any], concurrency: int) -> None:
         with urllib.request.urlopen(req, timeout=8) as resp:
             resp.read()
 
+    # Apply runtime browser pool size before warm/prefetch.
+    try:
+        _post("/config", {"thread": threads})
+    except Exception:
+        pass
     try:
         _post("/warm", {})
     except Exception:

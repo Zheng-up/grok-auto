@@ -32,7 +32,7 @@ export function AppShell() {
   const { theme, setTheme } = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
-  const fixedViewport = location.pathname === '/'
+  const fixedViewport = location.pathname === '/' || location.pathname === '/tasks'
 
   const toggleCollapsed = () => {
     setCollapsed((current) => {

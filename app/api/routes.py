@@ -143,6 +143,22 @@ def update_settings(
             services.remote.session_status(ensure=True, force_refresh=True)
         except Exception:
             pass
+    # Push local solver capacity immediately (one field: solver_browser_threads).
+    solver_keys = {
+        "solver_browser_threads",
+        "local_solver_url",
+        "captcha_provider",
+        "registration_concurrency",
+    }
+    if solver_keys.intersection(body.values or {}):
+        try:
+            from app.registration.runner import _notify_local_solver
+
+            cfg = services.settings.registration_config()
+            concurrency = int(cfg.get("registration_concurrency") or 2)
+            _notify_local_solver(cfg, concurrency)
+        except Exception:
+            pass
     return saved
 
 
@@ -427,6 +443,37 @@ def export_cpa(
     _: dict[str, Any] = Depends(require_admin),
 ) -> Response:
     return _download(services.exports.cpa_zip(body.account_ids or None), "auths.zip", "application/zip")
+
+
+
+@router.get("/logs")
+def list_logs(
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=300, ge=1, le=1000),
+    q: str = Query(default=""),
+    level: str = Query(default=""),
+    kind: str = Query(default="all"),
+    stream_id: str = Query(default=""),
+    _: dict[str, Any] = Depends(require_admin),
+) -> list[dict[str, Any]]:
+    """Full-page task log feed with filters."""
+    return services.events.query(
+        after_id=after,
+        limit=limit,
+        q=q or None,
+        level=level or None,
+        kind=kind or None,
+        stream_id=stream_id or None,
+    )
+
+
+@router.get("/logs/streams")
+def list_log_streams(
+    kind: str = Query(default="all"),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: dict[str, Any] = Depends(require_admin),
+) -> list[dict[str, Any]]:
+    return services.events.list_streams(kind=kind, limit=limit)
 
 
 @router.get("/logs/{stream_id}")

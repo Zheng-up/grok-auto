@@ -68,10 +68,10 @@ class TurnstileAPIServer:
         self.headless = headless
         # Hard cap browser pool size — Camoufox is hundreds of MB each.
         try:
-            hard_cap = int(os.getenv("TURNSTILE_THREAD_MAX", "3") or 3)
+            hard_cap = int(os.getenv("TURNSTILE_THREAD_MAX", "10") or 10)
         except (TypeError, ValueError):
-            hard_cap = 3
-        hard_cap = max(1, min(8, hard_cap))
+            hard_cap = 10
+        hard_cap = max(1, min(10, hard_cap))
         self.thread_count = max(1, min(hard_cap, int(thread or 1)))
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
@@ -194,6 +194,7 @@ class TurnstileAPIServer:
         self.app.route('/reclaim', methods=['POST', 'GET'])(self.reclaim)
         self.app.route('/warm', methods=['POST', 'GET'])(self.warm)
         self.app.route('/prefetch', methods=['POST'])(self.prefetch)
+        self.app.route('/config', methods=['POST', 'GET'])(self.config)
         self.app.route('/')(self.index)
         
 
@@ -1505,9 +1506,26 @@ class TurnstileAPIServer:
                 self._prefetch_tokens.pop(k, None)
 
     def _pop_prefetched_token(self, url: str, sitekey: str) -> str | None:
+        """Prefer exact url||sitekey; fall back to any ready token for same sitekey.
+
+        Registration historically prefetched cloud-console URL while solving grok-com
+        URL. Exact-key miss made prefetch look "armed" but never consumed.
+        """
         key = self._prefetch_key(url, sitekey)
-        self._purge_expired_tokens(key)
+        self._purge_expired_tokens()
         items = self._prefetch_tokens.get(key) or []
+        if not items and sitekey:
+            # Same sitekey, different redirect/query — still a valid one-shot token.
+            for alt_key, alt_items in list(self._prefetch_tokens.items()):
+                if not alt_items:
+                    continue
+                if alt_key == key:
+                    continue
+                if not str(alt_key).endswith(f"||{sitekey}"):
+                    continue
+                items = alt_items
+                key = alt_key
+                break
         if not items:
             return None
         item = items.pop(0)
@@ -1615,6 +1633,60 @@ class TurnstileAPIServer:
             except Exception as e:
                 logger.warning(f"prefetch loop error: {e}")
                 await asyncio.sleep(2.0)
+
+    async def config(self):
+        """Get or set runtime solver capacity (browser thread count).
+
+        POST body: {"thread": 1..N}  (capped by TURNSTILE_THREAD_MAX)
+        When thread changes, browser pool is rebuilt on next warm/solve.
+        """
+        if request.method == 'GET':
+            return jsonify({
+                "ok": True,
+                "thread": self.thread_count,
+                "pool_ready": bool(self._pool_ready),
+                "owned": len(self._owned_browsers or []),
+                "queue": self.browser_pool.qsize() if self.browser_pool else 0,
+                "prefetch_ready": sum(len(v or []) for v in (self._prefetch_tokens or {}).values()),
+            }), 200
+        try:
+            body = await request.get_json(force=True, silent=True) or {}
+        except Exception:
+            body = {}
+        raw = body.get("thread", body.get("threads", body.get("TURNSTILE_THREAD")))
+        if raw is None:
+            return jsonify({"ok": False, "error": "thread required"}), 400
+        try:
+            wanted = int(raw)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "thread must be int"}), 400
+        try:
+            hard_cap = int(os.getenv("TURNSTILE_THREAD_MAX", "10") or 10)
+        except (TypeError, ValueError):
+            hard_cap = 10
+        hard_cap = max(1, min(10, hard_cap))
+        wanted = max(1, min(hard_cap, wanted))
+        changed = wanted != int(self.thread_count or 1)
+        self.thread_count = wanted
+        rebuilt = False
+        if changed:
+            # Force pool rebuild so new size takes effect promptly.
+            try:
+                if self._pool_lock is None:
+                    self._pool_lock = asyncio.Lock()
+                async with self._pool_lock:
+                    if self._pool_ready or self._owned_browsers or self._playwright or self._camoufox:
+                        await self._shutdown_browsers()
+                    # Leave pool cold; /warm or next createTask will rebuild at new size.
+                    rebuilt = True
+            except Exception as e:
+                logger.warning(f"config thread={wanted} apply partial: {e}")
+        return jsonify({
+            "ok": True,
+            "thread": self.thread_count,
+            "changed": changed,
+            "rebuilt": rebuilt,
+        }), 200
 
     async def warm(self):
         """Warm browser pool without solving a captcha."""

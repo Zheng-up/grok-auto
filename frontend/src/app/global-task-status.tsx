@@ -106,7 +106,8 @@ export function GlobalTaskStatus() {
   const waitingCount = tasks.filter((task) => task.status === 'waiting').length
   const pausedCount = tasks.filter((task) => task.status === 'paused').length
   const failedCount = tasks.filter((task) => FAILED_STATUSES.has(task.status)).length
-  const activeCount = queuedCount + runningCount + waitingCount
+  // Badge = full workspace (active + paused + failed), so pending work is visible.
+  const activeCount = tasks.length
 
   const createRetry = async (task: TaskSpaceTask) => {
     const endpoint = task.kind === 'batch'
@@ -124,7 +125,7 @@ export function GlobalTaskStatus() {
     try {
       await createRetry(task)
       await query.refetch()
-      toast.success(task.status === 'waiting' ? '已解除限流等待，远端任务立即重试' : '重试任务已创建')
+      toast.success(task.kind === 'batch' ? '失败账号已重新入队' : '失败操作已重新入队')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '任务重试失败')
     } finally {
@@ -201,7 +202,7 @@ export function GlobalTaskStatus() {
 
   const pauseAll = async () => {
     if (controlling || retrying) return
-    const pausable = tasks.filter((task) => ['queued', 'running'].includes(task.status) || (task.kind === 'batch' && task.status === 'waiting'))
+    const pausable = tasks.filter((task) => ['queued', 'running', 'waiting'].includes(task.status))
     if (!pausable.length) return
     setControlling('all')
     let succeeded = 0
