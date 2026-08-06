@@ -200,10 +200,12 @@ class XConsoleAuthClient:
         try:
             self._scrape_rsc_payload(html)
         except Exception as exc:
+            hint = self._signup_html_diag(html)
             raise RuntimeError(
                 "Failed to extract next-action / next-router-state-tree from the "
                 "live sign-up page.  The x.ai deployment may have changed its "
-                "page structure.  Details: %s" % exc
+                "page structure, or the proxy returned a challenge/empty page.  "
+                "Details: %s · %s" % (exc, hint)
             ) from exc
 
         # scrape live Turnstile sitekey (config constant can go stale)
@@ -218,6 +220,23 @@ class XConsoleAuthClient:
             print(f"  [scrape] turnstile_sitekey={self.turnstile_sitekey}")
 
         return status
+
+    @staticmethod
+    def _signup_html_diag(html: str) -> str:
+        """Compact diagnostics when signup scrape fails (proxy/CF/empty page)."""
+        text = html or ""
+        low = text.lower()
+        flags = []
+        if not text.strip():
+            flags.append("empty_html")
+        if "just a moment" in low or "cf-challenge" in low or "cf-browser-verification" in low:
+            flags.append("cloudflare_challenge")
+        if "attention required" in low or "sorry, you have been blocked" in low:
+            flags.append("cloudflare_block")
+        chunk_n = len(re.findall(r"/_next/static/chunks/[^\"'\s>]+\.js", text, flags=re.I))
+        flags.append(f"html_len={len(text)}")
+        flags.append(f"js_chunks={chunk_n}")
+        return ", ".join(flags)
 
     @staticmethod
     def _scrape_turnstile_sitekey(html: str) -> Optional[str]:
@@ -335,22 +354,88 @@ class XConsoleAuthClient:
     # We must NOT prepend anything — the 42-char string from the JS chunk IS
     # the complete action ID.
 
-    def _scrape_action_id(self, html: str) -> str:
-        """Find the Next.js server action ID from the live page's JS chunks.
+    @staticmethod
+    def _collect_js_chunk_paths(html: str) -> List[str]:
+        """Collect /_next/static/chunks/*.js paths from signup HTML.
 
-        Action ID format:  ``<2 hex metadata><42 hex hash>`` = 44 chars.
-        The metadata byte is ``7f`` for a server-action using all arguments.
-
-        Strategy:
-          1. Download all JS chunks in parallel.
-          2. The chunk containing ``createUserAndSessionRequest`` is the
-             sign-up action module; its 42-char hex is the action hash.
-          3. Fallback: if that chunk has no hex, try any other 42-char hex
-             from any chunk (likely still correct — the hash format is
-             distinctive).
+        Matches double/single quotes and absolute accounts.x.ai URLs.
+        Empty list usually means CF challenge / empty body / structure change.
         """
+        text = html or ""
+        found: List[str] = []
+        seen: set[str] = set()
+        patterns = (
+            r"""src=["'](/_next/static/chunks/[^"']+\.js)["']""",
+            r"""["'](/_next/static/chunks/[^"']+\.js)["']""",
+            r"""https?://accounts\.x\.ai(/_next/static/chunks/[^"'\\\s>]+\.js)""",
+            r"""(/_next/static/chunks/[^"'\\\s>]+\.js)""",
+        )
+        for pat in patterns:
+            for m in re.finditer(pat, text, flags=re.I):
+                path = m.group(1)
+                if not path.startswith("/"):
+                    path = "/" + path.lstrip("/")
+                if path not in seen:
+                    seen.add(path)
+                    found.append(path)
+        return found
+
+    @staticmethod
+    def _action_id_from_text(text: str) -> Tuple[Optional[str], bool]:
+        """Return (action_id, is_signup_marker) from HTML or a JS chunk body."""
+        if not text:
+            return (None, False)
+        is_signup = any(
+            kw in text
+            for kw in (
+                "createUserAndSessionRequest",
+                "emailValidationCode",
+                "castleRequestToken",
+            )
+        )
+        # Strong signals first (same idea as grokRegister-cpa / protocol client).
+        for pat in (
+            r'createServerReference\)?\(["\']([a-f0-9]{40,44})["\']',
+            r'\$ACTION_ID_([a-f0-9]{40,44})',
+            r'next-action["\']?\s*[:=]\s*["\']([a-f0-9]{40,44})["\']',
+            r'["\']([a-f0-9]{42})["\']\s*,\s*(?:callServer|findSourceMapURL)',
+        ):
+            m = re.search(pat, text, flags=re.I)
+            if m:
+                return (m.group(1).lower(), is_signup)
+        # Near signup markers, pick the closest 40–44 hex.
+        if is_signup:
+            for marker in ("createUserAndSessionRequest", "emailValidationCode"):
+                idx = text.find(marker)
+                if idx < 0:
+                    continue
+                window = text[max(0, idx - 500) : idx + 500]
+                m = re.search(r'["\']([a-f0-9]{40,44})["\']', window, flags=re.I)
+                if m:
+                    return (m.group(1).lower(), True)
+        hashes = re.findall(r'["\']([a-f0-9]{42})["\']', text)
+        if hashes:
+            return (hashes[0].lower(), is_signup)
+        return (None, False)
+
+    def _scrape_action_id(self, html: str) -> str:
+        """Find the Next.js server action ID from the live page / JS chunks.
+
+        Strategy (aligned with grokRegister-cpa resilience, signup-oriented):
+          1. Parse strong patterns from the signup HTML itself.
+          2. Download referenced JS chunks (broader URL match than src=\"...\" only).
+          3. Prefer chunks containing createUserAndSessionRequest.
+          4. Fall back to config NEXT_ACTION_SIGNUP (may be stale after redeploy).
+        """
+        # 0. HTML-inline candidates (cheap; works when RSC embeds the id)
+        inline_id, inline_signup = self._action_id_from_text(html or "")
+        if inline_id and inline_signup:
+            if self.debug:
+                print(f"  [scrape] action ID from HTML (signup marker)={inline_id[:16]}...")
+            return inline_id
+
         # 1. collect all JS chunk URLs from the page
-        js_urls = list(set(re.findall(r'src="(/_next/static/chunks/[^"]+\.js)"', html)))
+        js_urls = self._collect_js_chunk_paths(html or "")
         if self.debug:
             print(f"  [scrape] searching {len(js_urls)} JS chunks...")
 
@@ -372,40 +457,44 @@ class XConsoleAuthClient:
         def _fetch_and_search(path: str) -> Tuple[Optional[str], bool]:
             """Return (hash_or_None, is_signup_chunk)."""
             try:
-                full = f"https://accounts.x.ai{path}"
+                full = path if path.startswith("http") else f"https://accounts.x.ai{path}"
                 _s, _h, _sc, raw = self._request("GET", full, headers=self._base_headers())
                 text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-                hashes = set(re.findall(r'"([a-f0-9]{42})"', text))
-                if not hashes:
-                    return (None, False)
-                is_signup = any(
-                    kw in text for kw in ("createUserAndSessionRequest", "emailValidationCode")
-                )
-                if is_signup and self.debug:
+                action_id, is_signup = self._action_id_from_text(text)
+                if is_signup and self.debug and action_id:
                     print(f"  [scrape] SIGN-UP ACTION CHUNK: {path}")
-                # Return the first hash (all 42-char hexes in a chunk are
-                # candidate action hashes; the sign-up chunk's hash is the
-                # correct one).
-                return (next(iter(hashes)), is_signup)
+                return (action_id, is_signup)
             except Exception:
                 return (None, False)
 
-        with ThreadPoolExecutor(max_workers=min(8, len(ordered))) as ex:
-            futures = {ex.submit(_fetch_and_search, url): url for url in ordered}
-            for f in as_completed(futures):
-                h, is_signup = f.result()
-                if h is None:
-                    continue
-                if is_signup:
-                    signup_hash = h
-                elif fallback_hash is None:
-                    fallback_hash = h
+        # Empty ordered → ThreadPoolExecutor(max_workers=0) raises ValueError.
+        # That used to surface as a misleading "page structure changed" error.
+        if ordered:
+            workers = max(1, min(8, len(ordered)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(_fetch_and_search, url): url for url in ordered}
+                for f in as_completed(futures):
+                    h, is_signup = f.result()
+                    if h is None:
+                        continue
+                    if is_signup:
+                        signup_hash = h
+                    elif fallback_hash is None:
+                        fallback_hash = h
 
-        action_hash = signup_hash or fallback_hash
+        action_hash = signup_hash or fallback_hash or (inline_id if inline_id else None)
         if action_hash is None:
+            # Last resort: bootstrap constant (grokRegister-cpa style). May 404
+            # after redeploy, but avoids hard-failing on empty/challenged HTML.
+            cfg = str(getattr(C, "NEXT_ACTION_SIGNUP", "") or "").strip().lower()
+            if re.fullmatch(r"[a-f0-9]{40,44}", cfg):
+                if self.debug:
+                    print(f"  [scrape] action ID fallback config={cfg[:16]}... "
+                          f"({self._signup_html_diag(html or '')})")
+                return cfg
             raise RuntimeError(
                 "Could not find the server action ID in any JS chunk.  "
-                "The page structure may have changed.  "
+                f"{self._signup_html_diag(html or '')}.  "
                 "As a workaround, manually set NEXT_ACTION_SIGNUP in config.py."
             )
 
@@ -413,8 +502,9 @@ class XConsoleAuthClient:
         #    Format: 2 hex chars metadata + 40 hex chars hash = 42 chars total.
         #    Do NOT prepend a metadata byte — it's already embedded.
         if self.debug:
+            source = "signup-chunk" if signup_hash else ("fallback-chunk" if fallback_hash else "html")
             print(f"  [scrape] action ID={action_hash[:16]}... "
-                  f"({len(action_hash)} chars, {'signup-chunk' if signup_hash else 'fallback'})")
+                  f"({len(action_hash)} chars, {source})")
         return action_hash
 
     @property
