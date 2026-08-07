@@ -112,6 +112,8 @@ def _solve_turnstile(
         website_key=sitekey,
         premium=not local,
         fallback_non_premium=True,
+        # Registration proxy pool must also cover Camoufox Turnstile solves.
+        proxy=(request.proxy or None),
     )
     if local:
         with _LOCAL_CAPTCHA_LIMIT:

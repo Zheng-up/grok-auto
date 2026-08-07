@@ -1057,6 +1057,104 @@ class TurnstileAPIServer:
         if self.debug:
             logger.debug(f"Browser {index}: Injected CAPTCHA directly into website with sitekey: {websiteKey}")
 
+
+    @staticmethod
+    def _proxy_log_label(proxy: Optional[str]) -> str:
+        """Redact credentials for logs."""
+        s = (proxy or "").strip()
+        if not s:
+            return "None"
+        try:
+            if "://" in s and "@" in s:
+                scheme, rest = s.split("://", 1)
+                auth, host = rest.rsplit("@", 1)
+                return f"{scheme}://***@{host}"
+            if s.count(":") >= 4 and "://" not in s:
+                parts = s.split(":")
+                return f"{parts[0]}://***@{parts[1]}:{parts[2]}"
+            return s
+        except Exception:
+            return "<proxy>"
+
+    def _normalize_task_proxy(self, proxy: Optional[str]) -> Optional[str]:
+        """Normalize registration/YesCaptcha proxy strings for Playwright/Camoufox.
+
+        Accepted:
+          - http(s)://user:pass@host:port
+          - socks5(h)://user:pass@host:port
+          - http://host:port
+          - host:port
+          - host:port:user:pass
+          - scheme://host:port:user:pass
+          - YesCaptcha-ish already-normalized URL
+        """
+        s = (proxy or "").strip()
+        if not s:
+            return None
+        # Playwright understands socks5:// not socks5h:// (remote DNS is default for SOCKS in PW).
+        lower = s.lower()
+        if lower.startswith("socks5h://"):
+            s = "socks5://" + s.split("://", 1)[1]
+        elif lower.startswith("socks4a://") or lower.startswith("socks4h://"):
+            s = "socks5://" + s.split("://", 1)[1]
+        elif lower.startswith("soket5://") or lower.startswith("socket5://"):
+            s = "socks5://" + s.split("://", 1)[1]
+        return s
+
+    def _parse_proxy_dict(self, proxy: Optional[str]) -> Optional[dict]:
+        """Convert proxy string → Playwright context proxy dict."""
+        s = self._normalize_task_proxy(proxy)
+        if not s:
+            return None
+        try:
+            if "://" in s:
+                scheme, rest = s.split("://", 1)
+                scheme = (scheme or "http").lower() or "http"
+                if scheme in {"socks5h", "socks4h", "socks4a"}:
+                    scheme = "socks5"
+                username = password = None
+                hostport = rest
+                if "@" in rest:
+                    auth, hostport = rest.rsplit("@", 1)
+                    if ":" in auth:
+                        username, password = auth.split(":", 1)
+                    else:
+                        username, password = auth, ""
+                # scheme://host:port:user:pass (no @)
+                elif hostport.count(":") >= 3:
+                    parts = hostport.split(":")
+                    # host:port:user:pass
+                    host, port, username, password = parts[0], parts[1], parts[2], ":".join(parts[3:])
+                    hostport = f"{host}:{port}"
+                if ":" not in hostport:
+                    raise ValueError(f"proxy missing port: {s}")
+                out = {"server": f"{scheme}://{hostport}"}
+                if username is not None:
+                    out["username"] = username
+                    out["password"] = password or ""
+                return out
+            parts = s.split(":")
+            if len(parts) == 2:
+                # host:port
+                return {"server": f"http://{parts[0]}:{parts[1]}"}
+            if len(parts) == 4:
+                host, port, user, pwd = parts[0], parts[1], parts[2], parts[3]
+                return {"server": f"http://{host}:{port}", "username": user, "password": pwd}
+            if len(parts) == 5:
+                scheme, host, port, user, pwd = parts
+                if scheme.lower() in {"socks5h", "socks4h", "socks4a"}:
+                    scheme = "socks5"
+                return {
+                    "server": f"{scheme}://{host}:{port}",
+                    "username": user,
+                    "password": pwd,
+                }
+            if len(parts) == 3 and parts[0] in {"http", "https", "socks5", "socks4"}:
+                return {"server": f"{parts[0]}://{parts[1]}:{parts[2]}"}
+            raise ValueError(f"Invalid proxy format: {s}")
+        except Exception as e:
+            raise ValueError(f"Invalid proxy format: {proxy}") from e
+
     def _build_context_options(self, browser_config: dict, proxy: Optional[str] = None) -> dict:
         """Build browser context options with Camoufox-safe defaults."""
         context_options: dict = {}
@@ -1074,33 +1172,13 @@ class TurnstileAPIServer:
             context_options["extra_http_headers"] = {"sec-ch-ua": str(sec_ch_ua).strip()}
 
         if proxy:
-            if "@" in proxy:
-                scheme_part, auth_part = proxy.split("://", 1)
-                auth, address = auth_part.split("@", 1)
-                username, password = auth.split(":", 1)
-                ip, port = address.split(":", 1)
-                context_options["proxy"] = {
-                    "server": f"{scheme_part}://{ip}:{port}",
-                    "username": username,
-                    "password": password,
-                }
-            else:
-                parts = proxy.split(":")
-                if len(parts) == 5:
-                    proxy_scheme, proxy_ip, proxy_port, proxy_user, proxy_pass = parts
-                    context_options["proxy"] = {
-                        "server": f"{proxy_scheme}://{proxy_ip}:{proxy_port}",
-                        "username": proxy_user,
-                        "password": proxy_pass,
-                    }
-                elif len(parts) == 3:
-                    context_options["proxy"] = {"server": proxy}
-                else:
-                    raise ValueError(f"Invalid proxy format: {proxy}")
+            parsed = self._parse_proxy_dict(proxy)
+            if parsed:
+                context_options["proxy"] = parsed
 
         return context_options
 
-    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):
+    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None, proxy: Optional[str] = None):
         """Solve the Turnstile challenge.
 
         Single-task multi-round: on timeout / empty token, close context and
@@ -1160,23 +1238,35 @@ class TurnstileAPIServer:
                 if self.debug:
                     logger.warning(f"Browser {index}: Cannot check browser state: {str(e)}")
 
-            proxy = None
-            if self.proxy_support:
-                proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
-                try:
-                    with open(proxy_file_path) as proxy_file:
-                        proxies = [line.strip() for line in proxy_file if line.strip()]
-                    proxy = random.choice(proxies) if proxies else None
-                    if self.debug and proxy:
-                        logger.debug(f"Browser {index}: Selected proxy: {proxy}")
-                    elif self.debug and not proxy:
-                        logger.debug(f"Browser {index}: No proxies available")
-                except FileNotFoundError:
-                    logger.warning(f"Proxy file not found: {proxy_file_path}")
-                    proxy = None
-                except Exception as e:
-                    logger.error(f"Error reading proxy file: {str(e)}")
-                    proxy = None
+            # Prefer per-task proxy from createTask (registration pool). Fall back
+            # to proxies.txt only when --proxy was enabled and no task proxy given.
+            task_proxy = self._normalize_task_proxy(proxy)
+            if task_proxy:
+                proxy = task_proxy
+                if self.debug:
+                    logger.debug(
+                        f"Browser {index}: Using task proxy: {self._proxy_log_label(proxy)}"
+                    )
+            else:
+                proxy = None
+                if self.proxy_support:
+                    proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
+                    try:
+                        with open(proxy_file_path) as proxy_file:
+                            proxies = [line.strip() for line in proxy_file if line.strip()]
+                        proxy = random.choice(proxies) if proxies else None
+                        if self.debug and proxy:
+                            logger.debug(
+                                f"Browser {index}: Selected proxies.txt: {self._proxy_log_label(proxy)}"
+                            )
+                        elif self.debug and not proxy:
+                            logger.debug(f"Browser {index}: No proxies available")
+                    except FileNotFoundError:
+                        logger.warning(f"Proxy file not found: {proxy_file_path}")
+                        proxy = None
+                    except Exception as e:
+                        logger.error(f"Error reading proxy file: {str(e)}")
+                        proxy = None
 
             for round_i in range(1, rounds + 1):
                 context = None
@@ -1189,18 +1279,30 @@ class TurnstileAPIServer:
                         )
 
                     context_options = self._build_context_options(
-                        browser_config or {}, proxy if self.proxy_support else None
+                        browser_config or {}, proxy
                     )
                     try:
                         context = await browser.new_context(**context_options)
                     except Exception as ctx_err:
                         # Fallback for Camoufox protocol mismatches / stricter option sets.
+                        # Keep proxy if present — dropping it would silently bypass the pool.
                         if self.debug:
                             logger.warning(
                                 f"Browser {index}: new_context failed ({ctx_err}); "
-                                f"retry minimal options"
+                                f"retry minimal options (proxy={self._proxy_log_label(proxy)})"
                             )
-                        context = await browser.new_context(no_viewport=True)
+                        minimal = {"no_viewport": True}
+                        parsed = None
+                        try:
+                            parsed = self._parse_proxy_dict(proxy) if proxy else None
+                        except Exception:
+                            parsed = None
+                        if parsed:
+                            minimal["proxy"] = parsed
+                        try:
+                            context = await browser.new_context(**minimal)
+                        except Exception:
+                            context = await browser.new_context(no_viewport=True)
 
                     page = await context.new_page()
                     try:
@@ -1225,7 +1327,7 @@ class TurnstileAPIServer:
                     if self.debug:
                         logger.debug(
                             f"Browser {index}: Starting Turnstile solve for URL: {url} "
-                            f"with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | Proxy: {proxy}"
+                            f"with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | Proxy: {self._proxy_log_label(proxy)}"
                         )
 
                     await page.goto(url, wait_until='domcontentloaded', timeout=30000)
@@ -1767,11 +1869,13 @@ class TurnstileAPIServer:
         sitekey: str,
         action: Optional[str] = None,
         cdata: Optional[str] = None,
+        proxy: Optional[str] = None,
     ):
         """创建任务并异步求解，返回 (task_id, error_response)。
 
         Prefer a one-shot prefetched token when available so registration workers
         spend less time blocked on Turnstile. Prefetch refill continues in background.
+        Per-task proxy skips prefetch: those tokens were solved without that proxy.
         """
         if not url or not sitekey:
             return None, {
@@ -1781,8 +1885,9 @@ class TurnstileAPIServer:
             }
 
         task_id = str(uuid.uuid4())
-        # Fast path: consume one ready token (single-use).
-        token = self._pop_prefetched_token(url, sitekey)
+        task_proxy = self._normalize_task_proxy(proxy)
+        # Fast path: consume one ready token (single-use). Skip when task has proxy.
+        token = None if task_proxy else self._pop_prefetched_token(url, sitekey)
         if token:
             elapsed = 0.0
             await save_result(task_id, "turnstile", {
@@ -1818,6 +1923,7 @@ class TurnstileAPIServer:
                     sitekey=sitekey,
                     action=action,
                     cdata=cdata,
+                    proxy=task_proxy,
                 )
             )
             if self.debug:
@@ -1942,7 +2048,34 @@ class TurnstileAPIServer:
             action = action or metadata.get("action")
             cdata = cdata or metadata.get("cdata")
 
-        task_id, err = await self._enqueue_turnstile(url, sitekey, action, cdata)
+        # Per-task proxy (registration pool). Accept URL form or YesCaptcha fields.
+        proxy = (
+            task.get("proxy")
+            or task.get("proxyUrl")
+            or task.get("proxyURL")
+            or body.get("proxy")
+        )
+        if not proxy:
+            p_type = str(task.get("proxyType") or task.get("proxy_type") or "").strip().lower()
+            p_addr = str(task.get("proxyAddress") or task.get("proxy_address") or "").strip()
+            p_port = task.get("proxyPort") or task.get("proxy_port")
+            p_login = task.get("proxyLogin") or task.get("proxy_login") or task.get("proxyUsername")
+            p_pass = task.get("proxyPassword") or task.get("proxy_password")
+            if p_addr and p_port:
+                scheme = p_type or "http"
+                if scheme in {"socks5h", "socks4h", "socks4a"}:
+                    scheme = "socks5"
+                if scheme not in {"http", "https", "socks5", "socks4"}:
+                    scheme = "http"
+                if p_login:
+                    proxy = f"{scheme}://{p_login}:{p_pass or ''}@{p_addr}:{p_port}"
+                else:
+                    proxy = f"{scheme}://{p_addr}:{p_port}"
+
+        if self.debug and proxy:
+            logger.debug(f"createTask proxy={self._proxy_log_label(str(proxy))}")
+
+        task_id, err = await self._enqueue_turnstile(url, sitekey, action, cdata, proxy=str(proxy).strip() if proxy else None)
         if err:
             return jsonify(err), 200
         return jsonify({"errorId": 0, "taskId": task_id}), 200

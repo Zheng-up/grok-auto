@@ -262,6 +262,7 @@ class YesCaptchaSolver:
         *,
         premium: bool = False,
         fallback_non_premium: bool = True,
+        proxy: str | None = None,
     ) -> str:
         """Solve a Cloudflare Turnstile challenge and return the token.
 
@@ -270,6 +271,7 @@ class YesCaptchaSolver:
             website_key: The Turnstile sitekey (format: 0x4...)
             premium: Prefer TurnstileTaskProxylessM1 first (remote YesCaptcha only)
             fallback_non_premium: if premium fails/timeouts, retry standard type
+            proxy: Optional proxy URL for local Camoufox / YesCaptcha task body
 
         Returns:
             The Turnstile token string (valid for ~120s)
@@ -343,11 +345,25 @@ class YesCaptchaSolver:
                     "websiteURL": website_url,
                     "websiteKey": website_key,
                 }
+                proxy_s = str(proxy or "").strip()
+                if proxy_s:
+                    # Local solver reads task.proxy; YesCaptcha also accepts URL form
+                    # on some deployments. Keep Proxyless type for local Camoufox
+                    # compatibility — proxy is orthogonal there.
+                    task["proxy"] = proxy_s
                 try:
+                    proxy_note = ""
+                    if proxy_s:
+                        if "://" in proxy_s and "@" in proxy_s:
+                            scheme, rest = proxy_s.split("://", 1)
+                            host = rest.rsplit("@", 1)[-1]
+                            proxy_note = f" proxy={scheme}://***@{host}"
+                        else:
+                            proxy_note = " proxy=on"
                     self._progress(
                         f"solve_turnstile outer={outer}/{outer_rounds} "
                         f"try {idx + 1}/{len(task_types)} "
-                        f"type={task_type} url={website_url} key={website_key[:12]}..."
+                        f"type={task_type} url={website_url} key={website_key[:12]}...{proxy_note}"
                     )
                     task_id = self._create_task(task)
                     result = self._get_result(task_id)
