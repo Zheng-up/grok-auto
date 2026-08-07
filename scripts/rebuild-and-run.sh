@@ -10,15 +10,15 @@ cd "$ROOT"
 
 IMAGE_CONSOLE="${IMAGE_CONSOLE:-grok-auto-console:local}"
 IMAGE_SOLVER="${IMAGE_SOLVER:-grok-auto-solver:local}"
-NETWORK="${NETWORK:-zradx-app}"
+NETWORK="${NETWORK:-YOUR-GENERIC-NETWORK}"
 SOLVER_URL="${SOLVER_URL:-http://solver:5072}"
 
 echo "[1/5] ensure networks"
-docker network inspect zradx-app >/dev/null 2>&1 || docker network create \
+docker network inspect YOUR-GENERIC-NETWORK >/dev/null 2>&1 || docker network create \
   --label zradx.role=app \
   --label zradx.description="Shared app network for loopback-proxied services" \
-  zradx-app
-NETWORK="${NETWORK:-zradx-app}"
+  YOUR-GENERIC-NETWORK
+NETWORK="${NETWORK:-YOUR-GENERIC-NETWORK}"
 
 echo "[2/5] build images"
 docker build -t "$IMAGE_SOLVER" "$ROOT/turnstile-solver"
@@ -72,4 +72,4 @@ echo -n "console: "; curl -fsS http://127.0.0.1:18080/health || true; echo
 echo -n "solver : "; docker exec grok-auto python -c "import urllib.request; print(urllib.request.urlopen('$SOLVER_URL/health', timeout=5).read().decode())" 2>/dev/null || \
   curl -fsS http://127.0.0.1:5072/health 2>/dev/null || echo '(solver internal-only OK if console can resolve alias)'
 echo
-echo "Done. Public entry: https://grokcli.zradx.com (OpenResty -> 127.0.0.1:18080)"
+echo "Public entry: https://YOUR-DEPLOYMENT.example (OpenResty -> 127.0.0.1:18080)"

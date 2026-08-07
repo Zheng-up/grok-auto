@@ -21,7 +21,7 @@ services:
       solver:
         condition: service_healthy
     networks:
-      - zradx-app
+      - YOUR-GENERIC-NETWORK
 
   solver:
     build: ./turnstile-solver
@@ -44,11 +44,11 @@ services:
     expose:
       - "5072"
     networks:
-      zradx-app:
+      YOUR-GENERIC-NETWORK:
         aliases:
           - solver
 
 networks:
-  zradx-app:
+  YOUR-GENERIC-NETWORK:
     external: true
-    name: zradx-app
+    name: YOUR-GENERIC-NETWORK

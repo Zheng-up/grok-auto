@@ -5,7 +5,7 @@
 
 当前版本：**v1.1.0**
 
-线上部署示例：`https://grokcli.zradx.com`（OpenResty TLS → `127.0.0.1:18080`）。
+线上部署示例：`https://YOUR-DEPLOYMENT.example`（OpenResty TLS → `127.0.0.1:18080`）。
 
 ## 功能边界
 
