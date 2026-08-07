@@ -13,7 +13,7 @@
 
 | 脚本 | 作用 |
 |---|---|
-| `start-web.bat` / `启动Web.bat` | 安装依赖、构建前端、启动控制台 `http://127.0.0.1:18080` |
+| `start-web.bat` / `启动Web.bat` | 安装依赖、构建前端、启动控制台（首选 `18080`，占用自动顺延） |
 | `start-solver.bat` / `启动Solver.bat` | 启动本地 Turnstile Solver `http://127.0.0.1:5072` |
 
 依赖：Python 3（`py` 启动器）、Node.js（`npm`）、PowerShell。
@@ -23,9 +23,10 @@ start-solver.bat
 start-web.bat
 ```
 
-浏览器打开 **`http://127.0.0.1:18080`**（必须带端口；用 `http` 不要用 `https`）。  
+启动后看黑窗里的 **真实地址**（`[start] console -> http://127.0.0.1:<port>`），用 `http` 打开且必须带端口。  
+首选端口默认 `18080`；若被占用（本机代理/旧进程等）会自动 `+1` 顺延，以日志为准，不要写死端口。  
 `127.0.0.1:5072` 是 Solver API，不是注册台页面。  
-若提示 `ERR_CONNECTION_REFUSED`：确认黑窗仍在运行、地址含 `:18080`，并检查系统/浏览器代理是否把 localhost 走了代理。
+若仍 `ERR_CONNECTION_REFUSED`：确认黑窗仍在运行，并检查系统/浏览器代理是否劫持了 localhost。
 
 ## 功能边界
 
@@ -80,7 +81,9 @@ start-web.bat
 
 1. 运行 `启动Solver.bat`，等待本地 Turnstile Solver 就绪。
 2. 运行 `启动Web.bat`。
-3. 打开 `http://127.0.0.1:18081`，首次访问创建管理员。
+3. 按黑窗打印的 `[start] console -> ...` 打开页面（端口可能已顺延）；首次访问创建管理员。
+
+**端口自动顺延**：`REG_CONSOLE_PORT`（默认 `18080`）被占用时逐个 `+1` 探测，最多 `REG_CONSOLE_PORT_PROBE_LIMIT` 次（默认 50）。最终以 `[start] console ->` 行为准。
 
 开发前端：
 
@@ -88,7 +91,7 @@ start-web.bat
 .\启动Web.ps1 -Dev
 ```
 
-开发页：`http://127.0.0.1:5173`。
+开发页：`http://127.0.0.1:5173`（Vite 默认代理到 `18080`；若控制台顺延了，请改 `frontend/vite.config.ts` 或固定端口）。
 
 ## Docker / Linux
 
@@ -120,7 +123,9 @@ chmod +x start.sh turnstile-solver/start.sh
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `REG_CONSOLE_HOST` / `PORT` | 监听地址 | `0.0.0.0` / `18080` |
+| `REG_CONSOLE_HOST` | 监听地址 | `0.0.0.0`（Windows 启动脚本默认 `127.0.0.1`） |
+| `REG_CONSOLE_PORT` | 首选端口；占用则自动 `+1` 顺延 | `18080` |
+| `REG_CONSOLE_PORT_PROBE_LIMIT` | 端口顺延最大尝试次数（含首选） | `50` |
 | `REG_CONSOLE_COOKIE_SECURE` | HTTPS 下 Cookie Secure | `0`（Compose 生产常用 `1`） |
 | `REG_CONSOLE_SESSION_HOURS` | 会话时长 | `24` |
 | `REG_CONSOLE_SOLVER_URL` | 本地 Solver 地址 | `http://127.0.0.1:5072`；Compose 内为 `http://solver:5072` |
@@ -184,6 +189,7 @@ npm --prefix frontend run build
 - 远端会话生命周期修复、失败任务重试与等待重试
 - 独立远端操作并发与自动入池开关
 - Solver 与 Console 分容器 Compose 部署说明
+- 控制台端口占用时自动顺延，启动日志打印真实访问地址
 
 ### v1.0.0
 

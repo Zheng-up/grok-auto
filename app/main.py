@@ -58,20 +58,33 @@ if FRONTEND_DIST.is_dir():
 def run() -> None:
     import uvicorn
 
-    from app.config import FRONTEND_DIST, runtime
+    from app.config import (
+        FRONTEND_DIST,
+        apply_listen_port,
+        public_base_url,
+        resolve_listen_port,
+        runtime,
+    )
 
-    # Human-facing URL: browsers should use loopback, not 0.0.0.0
-    display_host = "127.0.0.1" if runtime.host in {"0.0.0.0", "::", "[::]"} else runtime.host
-    ui = f"http://{display_host}:{runtime.port}"
-    print(f"[grok-auto] UI           {ui}", flush=True)
-    print(f"[grok-auto] health       {ui}/health", flush=True)
-    print(f"[grok-auto] frontend     {FRONTEND_DIST} exists={FRONTEND_DIST.is_dir()}", flush=True)
+    preferred = runtime.port
+    port = resolve_listen_port(runtime.host, preferred)
+    apply_listen_port(port)
+    base = public_base_url(runtime.host, port)
+
+    if port != preferred:
+        print(f"[port] {preferred} busy, auto advanced -> {port}", flush=True)
+    # 真正对外访问地址（以探测后的 port 为准，不要看脚本里的 preferred）
+    print(f"[start] console -> {base}", flush=True)
+    print(f"[start] health  -> {base}/health", flush=True)
+    print(f"[start] listen  -> http://{runtime.host}:{port}", flush=True)
+    print(f"[start] frontend {FRONTEND_DIST} exists={FRONTEND_DIST.is_dir()}", flush=True)
     if not (FRONTEND_DIST / "index.html").is_file():
         print(
-            "[grok-auto] WARNING: frontend/dist/index.html missing — build with: npm --prefix frontend run build",
+            "[start] WARNING: frontend/dist/index.html missing — build with: npm --prefix frontend run build",
             flush=True,
         )
-    uvicorn.run("app.main:app", host=runtime.host, port=runtime.port, reload=False)
+
+    uvicorn.run("app.main:app", host=runtime.host, port=port, reload=False)
 
 
 if __name__ == "__main__":

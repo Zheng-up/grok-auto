@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$Dev
 )
 $ErrorActionPreference = 'Stop'
@@ -10,12 +10,10 @@ Write-Host "[grok-auto] root = $Root"
 # Local Windows defaults: bind loopback explicitly (avoids some proxy/firewall oddities).
 if (-not $env:REG_CONSOLE_HOST) { $env:REG_CONSOLE_HOST = '127.0.0.1' }
 if (-not $env:REG_CONSOLE_PORT) { $env:REG_CONSOLE_PORT = '18080' }
+if (-not $env:REG_CONSOLE_PORT_PROBE_LIMIT) { $env:REG_CONSOLE_PORT_PROBE_LIMIT = '50' }
 $HostAddr = $env:REG_CONSOLE_HOST
-$Port = $env:REG_CONSOLE_PORT
-$ConsoleUrl = "http://127.0.0.1:$Port"
-if ($HostAddr -ne '0.0.0.0' -and $HostAddr -ne '::') {
-    $ConsoleUrl = "http://${HostAddr}:$Port"
-}
+$PreferredPort = [int]$env:REG_CONSOLE_PORT
+$ProbeLimit = [Math]::Max(1, [int]$env:REG_CONSOLE_PORT_PROBE_LIMIT)
 
 if (-not (Test-Path '.venv\Scripts\python.exe')) {
     Write-Host '[setup] creating .venv ...'
@@ -74,43 +72,45 @@ try {
     Write-Warning 'Local Turnstile Solver not ready. If you use local captcha, run start-solver.bat first.'
 }
 
-try {
-    $inUse = Get-NetTCPConnection -LocalPort ([int]$Port) -State Listen -ErrorAction SilentlyContinue
-    if ($inUse) {
-        Write-Warning "Port $Port already has a LISTEN process. If page fails, close the old console window or change REG_CONSOLE_PORT."
-    }
-} catch {
-}
-
 Write-Host ''
 Write-Host '===================================================='
-Write-Host "  Open UI in browser (HTTP, include port):"
-Write-Host "    $ConsoleUrl"
-Write-Host "  Health check:"
-Write-Host "    $ConsoleUrl/health"
+Write-Host "  Preferred port: $PreferredPort (auto +1 if busy, up to $ProbeLimit tries)"
+Write-Host '  Real URL is printed by Python as:'
+Write-Host '    [start] console -> http://127.0.0.1:<actual-port>'
 Write-Host '  Do NOT use https:// and do NOT omit :port'
-Write-Host "  If ERR_CONNECTION_REFUSED: disable system/browser proxy"
-Write-Host "  for localhost, or try http://localhost:$Port"
+Write-Host '  If browser fails: disable system/browser proxy for localhost'
 Write-Host '===================================================='
 Write-Host ''
 
+# Poll preferred..+limit for grok /health, then open the real URL (handles port auto-advance).
 $openScript = @"
-`$url = '$ConsoleUrl'
-for (`$i = 0; `$i -lt 60; `$i++) {
-  try {
-    `$r = Invoke-WebRequest -UseBasicParsing -Uri (`$url + '/health') -TimeoutSec 2
-    if (`$r.StatusCode -ge 200 -and `$r.StatusCode -lt 500) {
-      Start-Process `$url
-      exit 0
-    }
-  } catch {
-    Start-Sleep -Seconds 1
+`$start = $PreferredPort
+`$limit = $ProbeLimit
+`$hostAddr = '$HostAddr'
+for (`$n = 0; `$n -lt 90; `$n++) {
+  for (`$p = 0; `$p -lt `$limit; `$p++) {
+    `$port = `$start + `$p
+    if (`$port -gt 65535) { break }
+    `$disp = if (`$hostAddr -eq '0.0.0.0' -or `$hostAddr -eq '::') { '127.0.0.1' } else { `$hostAddr }
+    `$url = "http://`${disp}:`${port}"
+    try {
+      `$r = Invoke-WebRequest -UseBasicParsing -Uri (`$url + '/health') -TimeoutSec 1
+      if (`$r.StatusCode -ge 200 -and `$r.StatusCode -lt 500) {
+        `$body = ''
+        try { `$body = [string]`$r.Content } catch {}
+        if (`$body -match 'grok-registration-console') {
+          Start-Process `$url
+          exit 0
+        }
+      }
+    } catch {}
   }
+  Start-Sleep -Milliseconds 500
 }
 "@
 Start-Process -FilePath 'powershell' -WindowStyle Hidden -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $openScript
 ) | Out-Null
 
-Write-Host "[start] binding $HostAddr`:$Port ..."
+Write-Host "[start] launching console (host=$HostAddr preferred=$PreferredPort, auto-advance on busy) ..."
 & '.venv\Scripts\python.exe' -m app.main
