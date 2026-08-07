@@ -13,10 +13,10 @@ services:
       REG_CONSOLE_LOCAL_CONCURRENCY: ${REG_CONSOLE_LOCAL_CONCURRENCY:-2}
       REG_CONSOLE_SOLVER_URL: http://solver:5072
     ports:
-      # loopback only; OpenResty terminates TLS for grokcli.zradx.com
+      # loopback only; OpenResty terminates TLS for YOUR-DEPLOYMENT.example
       - "127.0.0.1:18080:18080"
     volumes:
-      - /opt/grok-auto/data:/app/data
+      - ./data:/app/data
     depends_on:
       solver:
         condition: service_healthy

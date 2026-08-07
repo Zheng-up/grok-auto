@@ -79,4 +79,4 @@ docker exec grok-auto-solver tail -n 100 /app/logs/turnstile_solver.log
 
 ## 与旧文档差异
 
-旧版描述为嵌在 `grokcli-2api` 主容器内的 inline solver；当前 **grok-auto** 部署为独立 `grok-auto-solver` 容器，通过 Docker 网络别名 `solver` 访问。
+旧版描述为嵌在 `legacy-parent-project` 主容器内的 inline solver；当前 **grok-auto** 部署为独立 `grok-auto-solver` 容器，通过 Docker 网络别名 `solver` 访问。

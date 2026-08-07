@@ -2,7 +2,7 @@
 # Rebuild and run grok-auto + turnstile solver with safe defaults.
 # - solver network alias: solver
 # - console bind: 127.0.0.1:18080
-# - data: /opt/grok-auto/data
+# - data: ./data (bind-mounted into console)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,8 +15,8 @@ SOLVER_URL="${SOLVER_URL:-http://solver:5072}"
 
 echo "[1/5] ensure networks"
 docker network inspect YOUR-GENERIC-NETWORK >/dev/null 2>&1 || docker network create \
-  --label zradx.role=app \
-  --label zradx.description="Shared app network for loopback-proxied services" \
+  --label app.role=app \
+  --label app.description="Shared app network for loopback-proxied services" \
   YOUR-GENERIC-NETWORK
 NETWORK="${NETWORK:-YOUR-GENERIC-NETWORK}"
 
@@ -62,7 +62,7 @@ docker run -d --name grok-auto --restart unless-stopped \
   -e REG_CONSOLE_LOCAL_CONCURRENCY="${REG_CONSOLE_LOCAL_CONCURRENCY:-2}" \
   -e REG_CONSOLE_SOLVER_URL="$SOLVER_URL" \
   -p 127.0.0.1:18080:18080 \
-  -v /opt/grok-auto/data:/app/data \
+  -v "$ROOT/data:/app/data" \
   "$IMAGE_CONSOLE"
 
 echo "[5/5] health"

@@ -1,4 +1,4 @@
-# Local Turnstile Solver (subproject of grokcli-2api)
+# Local Turnstile Solver (subproject of legacy-parent-project)
 quart>=0.19
 camoufox>=0.4
 patchright>=1.50

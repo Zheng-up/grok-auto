@@ -1,4 +1,4 @@
-# Local Turnstile Solver — Docker image for grokcli-2api subproject
+# Local Turnstile Solver — Docker image for legacy-parent-project subproject
 # Supports aarch64/x86_64. Camoufox + system libs for headless Firefox.
 FROM python:3.12-slim-bookworm
 

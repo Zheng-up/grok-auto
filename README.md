@@ -84,7 +84,7 @@ docker compose up -d --build
 - `console`：注册台（`grok-auto`）
 - `solver`：独立 Turnstile Solver（Camoufox，默认懒启动 + prefetch TTL）
 
-数据目录请挂载宿主机路径（示例部署使用 `/opt/grok-auto/data`）。
+数据目录请挂载宿主机路径（示例部署使用 `<install-dir>/data`）。
 
 本地非 Docker：
 

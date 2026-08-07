@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start local Turnstile Solver (host process; reachable by grokcli-2api container via docker bridge gateway).
+# Start local Turnstile Solver (host process; reachable by legacy-parent-project container via docker bridge gateway).
 set -euo pipefail
 cd "$(dirname "$0")"
 
