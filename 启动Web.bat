@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0启动Web.ps1" %*
-if errorlevel 1 pause
+call "%~dp0start-web.bat" %*
+exit /b %ERRORLEVEL%

@@ -1,4 +1,5 @@
 @echo off
-cd /d "%~dp0turnstile-solver"
-call TurnstileSolver.bat
-if errorlevel 1 pause
+setlocal EnableExtensions
+cd /d "%~dp0"
+call "%~dp0start-solver.bat" %*
+exit /b %ERRORLEVEL%

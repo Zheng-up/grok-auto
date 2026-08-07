@@ -7,6 +7,22 @@
 
 线上部署示例：`https://YOUR-DEPLOYMENT.example`（OpenResty TLS → `127.0.0.1:18080`）。
 
+## Windows 本地启动
+
+> 必须用 **CRLF** 换行的 `.bat`（仓库已加 `.gitattributes`）。若出现 `'ocal' is not recognized` / `'d' is not recognized` / `'rshell' is not recognized`，就是旧版 LF 换行脚本被 `cmd` 拆坏了：请更新到最新代码后重试。
+
+| 脚本 | 作用 |
+|---|---|
+| `start-web.bat` / `启动Web.bat` | 安装依赖、构建前端、启动控制台 `http://127.0.0.1:18080` |
+| `start-solver.bat` / `启动Solver.bat` | 启动本地 Turnstile Solver `http://127.0.0.1:5072` |
+
+依赖：Python 3（`py` 启动器）、Node.js（`npm`）、PowerShell。
+
+```bat
+start-solver.bat
+start-web.bat
+```
+
 ## 功能边界
 
 ### 注册
