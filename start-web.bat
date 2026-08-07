@@ -7,6 +7,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+echo.
+echo Open this URL after start:
+echo   http://127.0.0.1:18080
+echo (http only, port required; 5072 is Solver not the Web UI)
+echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-web.ps1" %*
 set ERR=%ERRORLEVEL%
 if not "%ERR%"=="0" (

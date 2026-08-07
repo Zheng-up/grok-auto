@@ -58,8 +58,19 @@ if FRONTEND_DIST.is_dir():
 def run() -> None:
     import uvicorn
 
-    from app.config import runtime
+    from app.config import FRONTEND_DIST, runtime
 
+    # Human-facing URL: browsers should use loopback, not 0.0.0.0
+    display_host = "127.0.0.1" if runtime.host in {"0.0.0.0", "::", "[::]"} else runtime.host
+    ui = f"http://{display_host}:{runtime.port}"
+    print(f"[grok-auto] UI           {ui}", flush=True)
+    print(f"[grok-auto] health       {ui}/health", flush=True)
+    print(f"[grok-auto] frontend     {FRONTEND_DIST} exists={FRONTEND_DIST.is_dir()}", flush=True)
+    if not (FRONTEND_DIST / "index.html").is_file():
+        print(
+            "[grok-auto] WARNING: frontend/dist/index.html missing — build with: npm --prefix frontend run build",
+            flush=True,
+        )
     uvicorn.run("app.main:app", host=runtime.host, port=runtime.port, reload=False)
 
 

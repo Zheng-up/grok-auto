@@ -23,6 +23,10 @@ start-solver.bat
 start-web.bat
 ```
 
+浏览器打开 **`http://127.0.0.1:18080`**（必须带端口；用 `http` 不要用 `https`）。  
+`127.0.0.1:5072` 是 Solver API，不是注册台页面。  
+若提示 `ERR_CONNECTION_REFUSED`：确认黑窗仍在运行、地址含 `:18080`，并检查系统/浏览器代理是否把 localhost 走了代理。
+
 ## 功能边界
 
 ### 注册
