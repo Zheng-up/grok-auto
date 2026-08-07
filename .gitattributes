@@ -1,5 +1,9 @@
-# Windows launchers must use CRLF or cmd.exe breaks (e.g. ocal / d / rshell).
-*.bat text eol=crlf
-*.cmd text eol=crlf
-*.ps1 text eol=crlf
+# Keep Windows launchers as CRLF BYTES in the repo.
+# GitHub ZIP downloads do not apply eol smudge filters; LF-only .bat
+# breaks cmd.exe ('ocal' / 'd' / 'rshell' is not recognized).
+*.bat -text
+*.cmd -text
+*.ps1 -text
+
+# Unix shell scripts stay LF
 *.sh text eol=lf
